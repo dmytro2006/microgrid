@@ -133,6 +133,41 @@ def generate_evs(site: SiteConfig, cfg: SimConfig, rng: np.random.Generator) -> 
     return evs
 
 
+def expected_arrivals(site: SiteConfig, cfg: SimConfig) -> np.ndarray:
+    """Oczekiwana liczba przyjazdów w każdym kroku Δt (intensywność procesu Poissona × Δt)."""
+    hh = np.linspace(0, 24, 24 * 60, endpoint=False)
+    lam_scale = site.ev_per_day / (_arrival_rate_shape(hh).mean() * 24.0)
+    h = (np.arange(cfg.n_steps) * cfg.dt_min + cfg.dt_min / 2) / 60.0 % 24.0
+    return lam_scale * _arrival_rate_shape(h) * cfg.dt_h
+
+
+def fleet_means(cfg: SimConfig) -> dict[str, float]:
+    """Średnie parametry sesji: potrzebna energia [kWh], moc ładowania [kW], udział sesji DC."""
+    p = cfg.ev
+    need = (np.mean(p.soc_target) - np.mean(p.soc_init))
+    if cfg.ev_fleet == "real":
+        w = np.array([m.weight for m in EV_MODELS])
+        w = w / w.sum()
+        cap = float(np.dot(w, [m.battery_kwh for m in EV_MODELS]))
+        p_ac = float(np.dot(w, [min(m.ac_kw, p.ac_charger_kw) for m in EV_MODELS]))
+        p_dc = float(np.dot(w, [min(m.dc_kw, p.dc_charger_kw) for m in EV_MODELS]))
+        dc = p.dc_share
+        return {"e_need": need * cap, "p": (1 - dc) * p_ac + dc * p_dc, "dc": dc}
+    cap = float(np.mean(p.battery_kwh))
+    return {"e_need": need * cap, "p": float(np.dot(p.p_ch_max_kw, p.p_ch_weights)), "dc": 0.0}
+
+
+def mean_parking_h(hour_of_day: np.ndarray, cfg: SimConfig) -> np.ndarray:
+    """Oczekiwany czas postoju [h] (średnia rozkładu log-normalnego) w zależności od godziny przyjazdu."""
+    p = cfg.ev
+    f = math.exp(p.park_sigma**2 / 2)
+    ac = np.where(hour_of_day >= 17.0, p.park_median_evening_h, p.park_median_h) * f
+    ac = np.clip(ac, p.park_min_h, p.park_max_h)
+    if cfg.ev_fleet == "real":
+        return (1 - p.dc_share) * ac + p.dc_share * max(p.park_min_h, p.park_median_dc_h * f)
+    return ac
+
+
 class Station:
     """Stacja ładowania: N punktów (simpy.Resource) + ograniczona kolejka FIFO."""
 

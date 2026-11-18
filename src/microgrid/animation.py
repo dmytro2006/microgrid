@@ -17,8 +17,9 @@ import json
 import numpy as np
 
 from .config import GRID_SUPPLY_POINT
-from .map_view import NODE_COLORS, OFFSETS, chargers_data
+from .map_view import NODE_COLORS, OFFSETS, chargers_data, fit_zoom
 from .simulation import Results
+from .tariff import import_price
 
 MAX_FRAMES = 2016  # np. 7 dni × 288 kroków 5-min
 
@@ -29,7 +30,8 @@ def _stride(n: int) -> int:
 
 def _series(r: Results, step: int) -> dict:
     ts = r.ts.iloc[::step]
-    cols = ["load", "pv", "wind", "p_ev", "p_bess", "soc_bess", "p_grid", "price", "n_active", "n_queue"]
+    cols = ["load", "pv", "wind", "p_ev", "p_ev_ch", "p_ev_dis", "p_bess", "soc_bess", "p_grid", "price",
+            "n_active", "n_queue"]
     return {c: np.round(ts[c].to_numpy(dtype=float), 2).tolist() for c in cols}
 
 
@@ -104,6 +106,7 @@ def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool =
     payload = {
         "times": _times(results[0], step), "sites": sites,
         "gpz": GRID_SUPPLY_POINT, "offsets": OFFSETS, "colors": NODE_COLORS,
+        "zoom": fit_zoom([r.site.lat for r in results], [r.site.lon for r in results]),
         "chargers": [{"pos": c["position"], "name": c["name"] + " – " + c["info"], "dc": c["dc"]}
                      for c in chargers_data()],
     }
@@ -180,9 +183,9 @@ function buildFrame(k, dt) {{
 const deckgl = new deck.Deck({{
   parent: document.getElementById('map'),
   initialViewState: {{
-    latitude: D.sites.reduce((a, s) => a + s.lat, 0) / D.sites.length,
-    longitude: D.sites.reduce((a, s) => a + s.lon, 0) / D.sites.length,
-    zoom: 12.3, pitch: 35, bearing: 0
+    latitude: (Math.max(...D.sites.map(s => s.lat)) + Math.min(...D.sites.map(s => s.lat))) / 2,
+    longitude: (Math.max(...D.sites.map(s => s.lon)) + Math.min(...D.sites.map(s => s.lon))) / 2,
+    zoom: D.zoom, pitch: 35, bearing: 0
   }},
   controller: true,
   getTooltip: ({{object}}) => object && object.name ? object.name : null,
@@ -402,5 +405,257 @@ function render(k, dt) {{
   drawChart(k);
 }}
 window.addEventListener('resize', () => {{ lastK = -1; }});
+makePlayer(N, render, {{autoplay: true}});
+</script></body></html>"""
+
+
+# ------------------------------------------------------------------ parking / porównanie strategii
+def _station_payload(r: Results, step: int) -> dict:
+    """Klatki: lista [stanowisko, id, SoC%, P kW, cel%, model] + skumulowany koszt i przeciążenia."""
+    ts = r.ts
+    tr = r.ev_trace if r.ev_trace is not None else None
+    ses = r.sessions.set_index("id")
+    frames_k = list(range(0, len(ts), step))
+    by_k = {k: g for k, g in tr.groupby("k")} if tr is not None and len(tr) else {}
+    slots: dict[int, int] = {}
+    n_slots = r.site.n_chargers
+    frames = []
+    for k in frames_k:
+        g = by_k.get(k)
+        ids = [] if g is None else g["id"].tolist()
+        for i in list(slots):
+            if i not in ids:
+                del slots[i]
+        used = set(slots.values())
+        for i in ids:
+            if i not in slots:
+                free = next((x for x in range(n_slots) if x not in used), None)
+                if free is not None:
+                    slots[i] = free
+                    used.add(free)
+        cars = []
+        if g is not None:
+            for row in g.itertuples():
+                if row.id in slots:
+                    cars.append([slots[row.id], int(row.id), round(100 * row.soc), round(row.p, 1),
+                                 round(100 * ses.at[row.id, "soc_target"])])
+        frames.append(cars)
+    dt_h = r.cfg.dt_h
+    pimp = import_price(ts["price"].to_numpy(), ts["time"])
+    imp = ts["p_grid"].clip(lower=0).to_numpy()
+    exp = (-ts["p_grid"]).clip(lower=0).to_numpy()
+    cost = np.cumsum((imp * pimp - exp * ts["price"].to_numpy()) * dt_h / 1000.0)
+    over = np.cumsum((ts["p_grid"].abs() > r.site.p_max_kw).to_numpy() * r.cfg.dt_min)
+    models = {int(i): (m or f"{c:g} kWh") for i, m, c in zip(r.sessions["id"], r.sessions["model"],
+                                                               r.sessions["cap_kwh"])}
+    return {
+        "label": __import__("microgrid.controller", fromlist=["CONTROLLERS"]).CONTROLLERS[r.strategy].label,
+        "n": n_slots, "p_max": r.site.p_max_kw, "p_lim": r.site.p_limit_kw,
+        "frames": frames, "grid": np.round(ts["p_grid"].to_numpy()[::step], 1).tolist(),
+        "queue": ts["n_queue"].to_numpy()[::step].astype(int).tolist(),
+        "cost": np.round(cost[::step]).tolist(), "over": over[::step].astype(int).tolist(),
+        "models": models,
+    }
+
+
+def station_html(results: list[Results], height: int = 560) -> str:
+    """Parking stacji: auta wjeżdżają na stanowiska, pasek SoC z celem, moc ładowania / V2G.
+
+    Kilka wyników (np. A i D) = porównanie strategii obok siebie z jednym odtwarzaczem.
+    """
+    step = _stride(len(results[0].ts))
+    payload = {"times": _times(results[0], step), "views": [_station_payload(r, step) for r in results],
+               "site": results[0].site.name}
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>{_COMMON_CSS}
+.views {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(380px, 1fr)); gap:12px; }}
+.view {{ border:1px solid var(--line); border-radius:8px; padding:8px; background:var(--panel); }}
+.view h3 {{ margin:0 0 4px; font-size:14px; }}
+.stats {{ display:flex; gap:14px; flex-wrap:wrap; font-variant-numeric:tabular-nums; font-size:12px; margin-bottom:4px; }}
+.stats b {{ font-size:14px; }}
+.gauge {{ height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:2px 0 6px; position:relative; }}
+.gauge i {{ display:block; height:100%; transition:width .15s; }}
+.gauge u {{ position:absolute; top:-2px; bottom:-2px; width:2px; background:#c92a2a; }}
+svg text {{ fill:var(--fg); }}
+.car {{ transition:transform .45s ease-out, opacity .45s; }}
+.spark {{ width:100%; height:46px; display:block; }}
+</style></head><body>
+{_CONTROLS_HTML}
+<div class="views" id="views"></div>
+<script>
+const D = {json.dumps(payload, ensure_ascii=False)};
+{_CONTROLS_JS}
+const COLS = 8, BW = 46, BH = 74;
+const root = document.getElementById('views');
+const V = D.views.map((v, vi) => {{
+  const rows = Math.ceil(v.n / COLS), W = COLS * BW + 20, H = rows * BH + 40;
+  let bays = '';
+  for (let i = 0; i < v.n; i++) {{
+    const x = 10 + (i % COLS) * BW, y = 6 + Math.floor(i / COLS) * BH;
+    bays += `<g transform="translate(${{x}},${{y}})">
+      <rect x="2" y="0" width="${{BW-4}}" height="${{BH-8}}" fill="none" stroke="var(--line)" stroke-dasharray="4 3"/>
+      <rect x="${{BW/2-5}}" y="-2" width="10" height="8" rx="2" fill="#868e96"/>
+      <g class="car" id="c${{vi}}_${{i}}" style="opacity:0;transform:translateY(60px)">
+        <rect x="7" y="10" width="${{BW-14}}" height="40" rx="8" class="body"/>
+        <rect x="11" y="15" width="${{BW-22}}" height="9" rx="3" fill="rgba(255,255,255,.75)"/>
+        <rect x="11" y="37" width="${{BW-22}}" height="7" rx="2" fill="rgba(255,255,255,.55)"/>
+        <rect x="6" y="54" width="${{BW-12}}" height="6" rx="2" fill="var(--line)"/>
+        <rect x="6" y="54" width="0" height="6" rx="2" class="soc" fill="#2f9e44"/>
+        <rect x="6" y="52" width="1.5" height="10" class="tgt" fill="var(--fg)"/>
+        <text x="${{BW/2}}" y="35" text-anchor="middle" font-size="9" font-weight="700" class="pw" style="fill:#fff"></text>
+        <path class="bolt" d="M${{BW/2+1}},1 l-5,8 h4 l-2,6 l6,-9 h-4 z" fill="#ffd43b"/>
+        <title></title>
+      </g></g>`;
+  }}
+  const el = document.createElement('div');
+  el.className = 'view';
+  el.innerHTML = `<h3>${{v.label}}</h3>
+    <div class="stats"><span>P_grid <b id="g${{vi}}"></b></span><span>koszt narastająco <b id="k${{vi}}"></b></span>
+    <span>przeciążenie <b id="o${{vi}}"></b></span><span>kolejka <b id="q${{vi}}"></b></span></div>
+    <div class="gauge"><i id="gb${{vi}}"></i><u style="left:${{100 * v.p_lim / (1.3 * v.p_max)}}%"></u></div>
+    <svg viewBox="0 0 ${{W}} ${{H}}" width="100%">${{bays}}
+      <g id="queue${{vi}}" transform="translate(10,${{rows * BH + 14}})"></g>
+      <text x="${{W - 10}}" y="${{rows * BH + 28}}" text-anchor="end" font-size="11" class="muted" style="fill:var(--muted)">wjazd ↑ · kolejka</text>
+    </svg><canvas class="spark" id="sp${{vi}}"></canvas>`;
+  root.appendChild(el);
+  return {{v, vi, last: Array(v.n).fill(null)}};
+}});
+const fmt = x => Math.round(x).toLocaleString('pl-PL');
+function color(p, soc, tgt) {{
+  if (p < -0.05) return '#2f9e44';            // V2G
+  if (p > 0.05) return '#e8590c';             // ładowanie
+  return soc >= tgt - 0.5 ? '#1c7ed6' : '#868e96';  // naładowany / czeka
+}}
+function spark(o, k) {{
+  const cv = document.getElementById('sp' + o.vi), ctx = cv.getContext('2d'), dpr = devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr) {{ cv.width = W * dpr; cv.height = H * dpr; }}
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+  const g = o.v.grid, n = g.length, hi = 1.3 * o.v.p_max, lo = Math.min(0, ...g);
+  const x = i => W * i / (n - 1), y = v => 2 + (H - 4) * (1 - (v - lo) / (hi - lo));
+  ctx.strokeStyle = '#c92a2a'; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(0, y(o.v.p_max)); ctx.lineTo(W, y(o.v.p_max)); ctx.stroke();
+  ctx.setLineDash([]); ctx.strokeStyle = '#1c4c78'; ctx.lineWidth = 1.2; ctx.beginPath();
+  g.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))); ctx.stroke();
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--fg'); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x(k), 0); ctx.lineTo(x(k), H); ctx.stroke();
+}}
+let lastK = -1;
+function render(k) {{
+  if (k === lastK) return; lastK = k;
+  document.getElementById('clock').textContent = D.times[k];
+  for (const o of V) {{
+    const v = o.v, cars = v.frames[k], seen = new Set();
+    for (const [slot, id, soc, p, tgt] of cars) {{
+      seen.add(slot);
+      const g = document.getElementById(`c${{o.vi}}_${{slot}}`);
+      if (o.last[slot] !== id) {{                 // nowy pojazd → wjazd
+        g.style.transition = 'none'; g.style.transform = 'translateY(60px)'; g.style.opacity = 0;
+        g.getBoundingClientRect(); g.style.transition = '';
+        o.last[slot] = id;
+      }}
+      g.style.transform = 'translateY(0)'; g.style.opacity = 1;
+      g.querySelector('.body').setAttribute('fill', color(p, soc, tgt));
+      g.querySelector('.soc').setAttribute('width', (BW - 12) * soc / 100);
+      g.querySelector('.soc').setAttribute('fill', soc >= tgt - 0.5 ? '#1c7ed6' : '#2f9e44');
+      g.querySelector('.tgt').setAttribute('x', 6 + (BW - 12) * tgt / 100);
+      g.querySelector('.pw').textContent = Math.abs(p) > 0.05 ? Math.round(Math.abs(p)) : '';
+      g.querySelector('.bolt').style.opacity = Math.abs(p) > 0.05 ? 1 : 0;
+      g.querySelector('title').textContent = `${{v.models[id] || ''}} · SoC ${{soc}}% → cel ${{tgt}}% · ${{p.toFixed(1)}} kW`;
+    }}
+    for (let i = 0; i < v.n; i++) if (!seen.has(i) && o.last[i] !== null) {{   // odjazd
+      const g = document.getElementById(`c${{o.vi}}_${{i}}`);
+      g.style.transform = 'translateY(-60px)'; g.style.opacity = 0; o.last[i] = null;
+    }}
+    const pg = v.grid[k];
+    document.getElementById('g' + o.vi).textContent = fmt(pg) + ' kW';
+    document.getElementById('k' + o.vi).textContent = fmt(v.cost[k]) + ' PLN';
+    document.getElementById('o' + o.vi).textContent = v.over[k] + ' min';
+    document.getElementById('q' + o.vi).textContent = v.queue[k];
+    const gb = document.getElementById('gb' + o.vi);
+    gb.style.width = Math.min(100, 100 * Math.abs(pg) / (1.3 * v.p_max)) + '%';
+    gb.style.background = Math.abs(pg) > v.p_max ? '#c92a2a' : Math.abs(pg) > v.p_lim ? '#f08c00' : '#2f9e44';
+    document.getElementById('queue' + o.vi).innerHTML = Array.from({{length: Math.min(v.queue[k], 12)}},
+      (_, i) => `<rect x="${{i * 22}}" y="0" width="18" height="12" rx="4" fill="#adb5bd"/>`).join('');
+    spark(o, k);
+  }}
+}}
+window.addEventListener('resize', () => {{ lastK = -1; }});
+makePlayer(D.times.length, render, {{autoplay: true}});
+</script></body></html>"""
+
+
+# ------------------------------------------------------------------ Sankey
+def sankey_html(r: Results, height: int = 520) -> str:
+    """Animowany wykres Sankeya: skąd pochodzi energia i dokąd płynie (alokacja proporcjonalna)."""
+    step = _stride(len(r.ts))
+    payload = {"times": _times(r, step), "S": _series(r, step), "dt_h": r.cfg.dt_h * step,
+               "site": r.site.name}
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>{_COMMON_CSS}
+svg text {{ fill:var(--fg); font-size:12px; }}
+.lbl {{ font-weight:600; }} .num {{ fill:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }}
+.link {{ transition: d .12s linear; mix-blend-mode:multiply; }}
+@media (prefers-color-scheme: dark) {{ .link {{ mix-blend-mode:screen; }} }}
+</style></head><body>
+{_CONTROLS_HTML}
+<div class="bar"><label><input type="radio" name="mode" value="inst" checked> moc chwilowa [kW]</label>
+<label><input type="radio" name="mode" value="cum"> energia narastająco [kWh]</label>
+<span class="muted">alokacja proporcjonalna: każdy odbiorca dostaje miks wszystkich źródeł</span></div>
+<svg id="sk" viewBox="0 0 900 {height - 110}" width="100%"></svg>
+<script>
+const D = {json.dumps(payload, ensure_ascii=False)};
+{_CONTROLS_JS}
+const S = D.S, N = D.times.length, Hh = {height - 110};
+const SRC = [['PV', '#f2b705', k => S.pv[k]], ['Wiatr', '#3bb2d0', k => S.wind[k]],
+             ['Sieć (import)', '#1c4c78', k => Math.max(0, S.p_grid[k])],
+             ['BESS (rozł.)', '#2f9e44', k => Math.max(0, -S.p_bess[k])], ['V2G', '#12b886', k => S.p_ev_dis[k]]];
+const DST = [['Odbiory', '#868e96', k => S.load[k]], ['Ładowanie EV', '#e8590c', k => S.p_ev_ch[k]],
+             ['BESS (ład.)', '#2f9e44', k => Math.max(0, S.p_bess[k])],
+             ['Eksport', '#7048e8', k => Math.max(0, -S.p_grid[k])]];
+// energia narastająco
+const cum = [...SRC, ...DST].map(([, , f]) => {{ let a = 0; return Array.from({{length: N}}, (_, k) => (a += f(k) * D.dt_h)); }});
+let maxInst = 0;
+for (let k = 0; k < N; k++) {{ let t = 0; for (const [, , f] of SRC) t += f(k); maxInst = Math.max(maxInst, t); }}
+const svg = document.getElementById('sk');
+const X0 = 150, X1 = 750, NW = 16, GAP = 10, TOP = 10, PAD = 26;  // PAD – miejsce na etykietę
+let mode = 'inst';
+document.querySelectorAll('input[name=mode]').forEach(e => e.onchange = () => {{ mode = e.value; lastK = -1; }});
+function vals(k) {{
+  if (mode === 'inst') return [SRC.map(([, , f]) => f(k)), DST.map(([, , f]) => f(k))];
+  return [SRC.map((_, i) => cum[i][k]), DST.map((_, i) => cum[SRC.length + i][k])];
+}}
+let lastK = -1;
+function render(k) {{
+  if (k === lastK) return; lastK = k;
+  document.getElementById('clock').textContent = D.times[k];
+  const [s, d] = vals(k), tot = s.reduce((a, b) => a + b, 0) || 1e-9;
+  const scaleMax = mode === 'inst' ? maxInst : cum.slice(0, SRC.length).reduce((a, c) => a + c[N - 1], 0);
+  const avail = Hh - 2 * TOP - (GAP + PAD) * SRC.length, sc = avail / Math.max(scaleMax, 1e-9);
+  const unit = mode === 'inst' ? ' kW' : ' kWh';
+  let out = '', ys = TOP; const sy = [], dy = [];
+  s.forEach((v, i) => {{ sy.push(ys); ys += v * sc + GAP + PAD; }});
+  let yd = TOP; d.forEach((v, j) => {{ dy.push(yd); yd += v * sc + GAP + PAD; }});
+  const so = sy.slice(), dofs = dy.slice();
+  s.forEach((sv, i) => d.forEach((dv, j) => {{
+    const w = sv * dv / tot * sc; if (w < 0.3) {{ return; }}
+    const y0 = so[i], y1 = dofs[j]; so[i] += w; dofs[j] += w;
+    const xm = (X0 + X1) / 2;
+    out += `<path class="link" fill="${{SRC[i][1]}}" fill-opacity=".45" d="M${{X0 + NW}},${{y0}} C${{xm}},${{y0}} ${{xm}},${{y1}} ${{X1}},${{y1}}
+      L${{X1}},${{y1 + w}} C${{xm}},${{y1 + w}} ${{xm}},${{y0 + w}} ${{X0 + NW}},${{y0 + w}} Z"><title>${{SRC[i][0]}} → ${{DST[j][0]}}: ${{(sv * dv / tot).toFixed(1)}}${{unit}}</title></path>`;
+  }}));
+  s.forEach((v, i) => {{
+    out += `<rect x="${{X0}}" y="${{sy[i]}}" width="${{NW}}" height="${{Math.max(1, v * sc)}}" fill="${{SRC[i][1]}}"/>
+      <text x="${{X0 - 8}}" y="${{sy[i] + v * sc / 2}}" text-anchor="end" dominant-baseline="middle"><tspan class="lbl">${{SRC[i][0]}}</tspan>
+      <tspan class="num" x="${{X0 - 8}}" dy="14">${{v.toFixed(mode === 'inst' ? 1 : 0)}}${{unit}}</tspan></text>`;
+  }});
+  d.forEach((v, j) => {{
+    out += `<rect x="${{X1}}" y="${{dy[j]}}" width="${{NW}}" height="${{Math.max(1, v * sc)}}" fill="${{DST[j][1]}}"/>
+      <text x="${{X1 + NW + 8}}" y="${{dy[j] + v * sc / 2}}" dominant-baseline="middle"><tspan class="lbl">${{DST[j][0]}}</tspan>
+      <tspan class="num" x="${{X1 + NW + 8}}" dy="14">${{v.toFixed(mode === 'inst' ? 1 : 0)}}${{unit}}</tspan></text>`;
+  }});
+  svg.innerHTML = out;
+}}
 makePlayer(N, render, {{autoplay: true}});
 </script></body></html>"""

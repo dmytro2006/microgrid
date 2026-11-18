@@ -14,8 +14,8 @@ from .plots import plot_cost_breakdown, plot_grid_comparison, plot_kpi_bars, plo
 from .simulation import Results
 from .tariff import DEFAULT_TARIFF
 
-MAIN_KPIS = ["T_over [min/doba]", "dP_over_max [kW]", "SSR_import [%]", "UDR [%]", "EFC [-]",
-             "Utrata SoH BESS [%]", "E_V2G [kWh]", "Koszt całk. [PLN]"]
+MAIN_KPIS = ["T_over [min/doba]", "dP_over_max [kW]", "SSR_import [%]", "UDR [%]", "UDR wykonalne [%]",
+             "EFC [-]", "Utrata SoH BESS [%]", "E_V2G [kWh]", "Koszt całk. [PLN]"]
 
 
 def _svg(fig) -> str:
@@ -55,7 +55,8 @@ td:first-child,th:first-child{{text-align:left}} svg{{max-width:100%;height:auto
 dystrybucja zm. {t.dist_variable_pln_mwh:g} + jakościowa {t.quality_pln_mwh:g} + OZE/kogen. {t.res_fees_pln_mwh:g} PLN/MWh;
 opłata mocowa {t.capacity_fee_pln_mwh:g} PLN/MWh (dni robocze 7–22); składnik stały {t.fixed_pln_kw_month:g} PLN/kW/mies.;
 kara za przekroczenie mocy umownej {t.overrun_multiplier:g}× składnik stały × suma 10 największych nadwyżek;
-zużycie BESS {t.bess_wear_pln_kwh:.3f} PLN/kWh przepływu. Eksport rozliczany po cenie spot.</p>""")
+zużycie BESS z modelu starzenia (rainflow + kalendarzowe, CAPEX {t.bess_capex_pln_kwh:g} PLN/kWh).
+Eksport rozliczany po cenie spot.</p>""")
 
     for site in sites:
         parts.append(f"<h2>{html.escape(site)}</h2>")

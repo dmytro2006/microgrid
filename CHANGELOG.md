@@ -2,6 +2,74 @@
 
 Wszystkie zmiany na gałęzi `feature/real-data-animations` względem `master` (`092cb05 Initial commit`).
 
+## [0.4.0] – 2026-11-18 · prognoza przyjazdów, moc umowna, starzenie BESS, nowe animacje, 9 węzłów
+
+### Dodane
+- **MPC z prognozą przyjazdów EV** (`SimConfig.mpc_ev_forecast`, domyślnie włączona). Oczekiwane przyjazdy
+  w każdym przyszłym kroku LP (intensywność procesu Poissona) tworzą zagregowany „wirtualny pojazd”:
+  - potrzebna energia n·E̅, moc n·P̄ (≤ liczba stanowisk), postój zależny od godziny przyjazdu;
+  - plan zostawia margines mocy i energii BESS na auta, które dopiero przyjadą.
+  - Efekt (styczeń, 7 dni): UDR w Nowej Hucie 38,7% → 28,4%, w Kazimierzu 27,5% → 24,3%,
+    przy koszcie wyższym o ok. 0,3%; latem bez istotnej zmiany.
+- **Moc umowna oddzielona od mocy przyłącza** (`SiteConfig.p_contract_kw`). EMS pilnuje min(moc umowna, P_max);
+  opłata stała i kary liczone są od mocy umownej.
+  - Nowa analiza `contract_sweep` / `best_contract` z wykresem kosztu, opłat i UDR.
+  - Opcjonalna wycena niedoładowania klientów (PLN za p.p. UDR) przesuwa optimum.
+- **Model starzenia BESS** (`aging.py`) zastępuje liniowy koszt zużycia w KPI:
+  - cykliczne: rainflow (ASTM E1049) + krzywa Wöhlera N(DoD) = N_ref·(DoD/DoD_ref)^−1.6;
+  - kalendarzowe: 2%/rok przy 25 °C i SoC 50%, mnożnik SoC (0,5 + SoC) i Arrhenius (Ea = 50 kJ/mol),
+    temperatura ogniwa zależna od temperatury otoczenia (dane rzeczywiste) lub 20 °C (syntetyczne);
+  - KPI: `Starzenie cykl. [%]`, `Starzenie kal. [%]`, `Utrata SoH BESS [%]`, `Zużycie BESS [PLN]`.
+- **KPI `UDR wykonalne [%]`**: niedoładowanie liczone tylko dla aut, które fizycznie dało się naładować do celu
+  (P_max × czas postoju ≥ potrzebna energia). Oddziela wpływ sterowania od fizyki
+  (w A zawsze 0%, w B–D średnio 0,5–8,6% zależnie od sezonu, w pojedynczych węzłach do 18%).
+- **Nowe animacje** (zakładka 🎬, przełącznik widoku):
+  - 🅿️ parking stacji: auta wjeżdżają na stanowiska i odjeżdżają, kolor = stan (ładowanie / V2G / naładowane /
+    czeka), pasek SoC z kreską celu, moc na karoserii, kolejka przy wjeździe, model auta po najechaniu,
+    pasek P_grid względem mocy umownej, koszt i minuty przeciążenia narastająco;
+  - 🆚 porównanie dwóch strategii (np. A i D) obok siebie ze wspólnym odtwarzaczem;
+  - 🔀 animowany wykres Sankeya: PV / wiatr / sieć / BESS / V2G → odbiory / EV / BESS / eksport,
+    tryb chwilowy [kW] i narastający [kWh].
+  - CLI `--anim` zapisuje też `parking_*.html` i `sankey_*.html`.
+- **6 nowych węzłów** (`KRAKOW_SITES_EXTRA`, `ALL_SITES` = 9) w miejscach skupisk ładowarek z OpenStreetMap:
+  Bonarka/Podgórze (OSM: 125 punktów w promieniu 500 m, Tesla Supercharger), Ruczaj/Kampus UJ (22),
+  Dworzec Główny (13), Czyżyny, Bieżanów-Prokocim (14), Prądnik Biały (10).
+  - Liczba stanowisk wg OSM; moc przyłącza wg typoszeregu transformatorów 160/250/400/630 kVA (cos φ = 0,95).
+  - Mapy dopasowują przybliżenie do rozrzutu węzłów; w panelu jest wybór węzłów do symulacji.
+- `Results.ev_trace`: SoC i moc każdego podłączonego auta w każdym kroku.
+- Testy: 39 (było 26).
+
+### Zmienione
+- Dane pogodowe pobierane dla siatki 0,1° (rozdzielczość modeli ~9–11 km). Pobliskie węzły dzielą plik cache;
+  cache przebudowany (`weather_50.0_19.9_2026-06.csv` itd.).
+- CLI domyślnie liczy wszystkie 9 węzłów (`--sites` filtruje); nowa flaga `--no-ev-forecast`.
+- Raport HTML zawiera nowe KPI (UDR wykonalne, utrata SoH).
+
+### Wyniki – 9 węzłów, 7 dni, dane rzeczywiste, flota realna (suma węzłów)
+
+| scenariusz | koszt cz. | kara cz. | koszt st. | kara st. | UDR wyk. cz./st. [%] | V2G cz. [kWh] | zużycie BESS cz./st. [PLN] |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 541 445 | 350 377 | 1 280 922 | 950 373 | 0,0 / 0,0 | 0 | 5 298 / 3 242 |
+| B | 194 520 | 0 | 324 021 | 0 | 0,5 / 5,9 | 0 | 8 366 / 6 137 |
+| C | 184 435 | 0 | 320 614 | 0 | 1,0 / 8,3 | 1 750 | 8 621 / 6 906 |
+| D | **177 553** | 0 | **314 132** | 0 | 2,1 / 8,6 | 4 130 | 8 269 / **4 403** |
+
+(cz. = tydzień od 15.06.2026, st. = tydzień od 12.01.2026; koszty w PLN)
+
+- Bez sterowania kary za moc umowną to 65% (lato) i 74% (zima) kosztu.
+- D jest najtańsze w obu sezonach (−3,7% / −2,0% względem C). Zimą zużywa magazyn najoszczędniej:
+  płytsze cykle dają o 36% niższy koszt starzenia niż C.
+- Starzenie magazynu: 0,03–0,06% SoH na tydzień, czyli ok. 1,5–3%/rok.
+  Część kalendarzowa jest porównywalna z cykliczną, więc bezczynny magazyn (A) też się starzeje.
+- Zimą najtrudniejsze są małe osiedlowe przyłącza (Bieżanów-Prokocim 18%, Czyżyny 13%, Prądnik Biały 13%
+  UDR wykonalnego w D). Ogrzewanie podnosi odbiory bazowe, a transformator 160/250 kVA zostawia mało miejsca na EV.
+- Dobór mocy umownej (Nowa Huta, P_max 200 kW):
+  - latem C osiąga minimum kosztu przy 140 kW, ale kosztem 26% niedoładowanych aut;
+    D – przy 180 kW (7% UDR) za praktycznie ten sam koszt;
+  - zimą optimum to 160–200 kW;
+  - bez wyceny niezadowolenia klientów optymalizacja kosztu „sprzedaje” jakość obsługi.
+    Dlatego w panelu jest kara za p.p. UDR.
+
 ## [0.3.0] – 2026-11-18 · optymalizacja, taryfa, analizy
 
 ### Dodane
@@ -91,8 +159,9 @@ Wnioski:
 
 ## Znane ograniczenia / dalsze kroki
 - Stawki taryfy są orientacyjne. Trzeba je zweryfikować z taryfą Tauron Dystrybucja na dany rok i umową sprzedaży.
-- MPC nie przewiduje przyjazdów EV. Kolejny krok to stochastyczne MPC z oczekiwanym napływem pojazdów
-  (rezerwa mocy) albo kara za UDR zależna od czasu.
+- MPC planuje dla wartości oczekiwanej przyjazdów. Kolejny krok to scenariusze (stochastyczne MPC) i kara za UDR
+  zależna od czasu.
 - Kalibracja przyjazdów i postojów EV na danych rzeczywistych (ACN-Data / operatorzy, KDE + test KS).
-- Moce transformatorów nadal są umowne. Do rozważenia typoszereg 160/250/400/630 kVA i cos φ.
+- Pierwsze 3 węzły mają moce umowne z wersji 0.1 (250/200/300 kW); nowe węzły – typoszereg transformatorów.
+- Model starzenia kalendarzowego jest liniowy (dla horyzontu tygodni). W dłuższej perspektywie właściwe jest prawo √t.
 - Ceny RCE są publikowane ex post. W trybie `persistence` MPC traktuje je jak znaną z wyprzedzeniem cenę RDN.

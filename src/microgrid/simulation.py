@@ -15,10 +15,13 @@ import simpy
 
 from .config import SimConfig, SiteConfig
 from .controller import CONTROLLERS, SiteState
-from .ev_generator import EV, TICK_EPS, Station, generate_evs
+from .ev_generator import EV, TICK_EPS, Station, expected_arrivals, fleet_means, generate_evs, mean_parking_h
 from .grid_environment import BESS, pcc_balance
 from .synthetic import generate_profiles
 from .tariff import DEFAULT_TARIFF, import_price
+
+
+SYNTH_T_AMB_C = 20.0  # temperatura otoczenia w trybie syntetycznym (model starzenia BESS)
 
 
 @dataclass
@@ -32,6 +35,7 @@ class Results:
     bess_e_init: float
     bess_e_final: float
     raw: pd.DataFrame | None = None  # surowe dane rzeczywiste (pogoda, RCE, KSE) na siatce Δt
+    ev_trace: pd.DataFrame | None = None  # (k, id, soc, p) dla podłączonych pojazdów w każdym kroku
 
 
 def site_seed(site: SiteConfig, seed: int) -> int:
@@ -65,6 +69,7 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
     price_sig = (pd.Series(profiles["price"])
                  .rolling(window=max(1, 60 // cfg.dt_min), center=True, min_periods=1).mean().to_numpy())
     rows: list[dict] = []
+    trace: list[tuple[int, int, float, float]] = []
     times = pd.Timestamp(cfg.start) + pd.to_timedelta(np.arange(cfg.n_steps) * cfg.dt_min, unit="min")
     fc_src = {key: profiles[key].copy() for key in ("load", "pv", "wind")}
     if cfg.forecast == "persistence":  # prognoza = ten sam kwadrans poprzedniej doby
@@ -74,6 +79,11 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
         "load": fc_src["load"], "net": fc_src["load"] - fc_src["pv"] - fc_src["wind"],
         "p_imp": import_price(profiles["price"], times), "p_exp": profiles["price"],
     }
+    if cfg.mpc_ev_forecast:
+        hod = (np.arange(cfg.n_steps) * cfg.dt_min / 60.0) % 24.0
+        forecast["ev_arrivals"] = expected_arrivals(site, cfg)
+        forecast["ev_park_h"] = mean_parking_h(hod, cfg)
+        forecast["ev_means"] = fleet_means(cfg)
 
     def ticker():
         yield env.timeout(TICK_EPS)
@@ -103,6 +113,7 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
                 else:
                     p = -min(-p, ev.max_discharge_kw(t, dt_h, cfg.ev.v2g_soc_floor))
                 ev.apply(p, dt_h)
+                trace.append((k, ev.id, ev.soc, p))
                 if p >= 0:
                     p_ch += p
                 else:
@@ -125,6 +136,7 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
     ts = pd.DataFrame(rows)
     ts["time"] = pd.Timestamp(cfg.start) + pd.to_timedelta(ts["t_min"], unit="min")
     ts["p_max"] = site.p_max_kw
+    ts["t_amb"] = raw["temp"].to_numpy() if raw is not None else SYNTH_T_AMB_C
 
     for ev in station.active.values():
         ev.status = "end_of_sim"
@@ -139,7 +151,8 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
         "energy_in_kwh": ev.energy_in_kwh, "energy_out_kwh": ev.energy_out_kwh,
     } for ev in sorted(all_evs, key=lambda e: e.id)])
 
-    return Results(site, strategy, cfg, ts, sessions, bess.losses_kwh, bess.e_init, bess.energy, raw)
+    ev_trace = pd.DataFrame(trace, columns=["k", "id", "soc", "p"])
+    return Results(site, strategy, cfg, ts, sessions, bess.losses_kwh, bess.e_init, bess.energy, raw, ev_trace)
 
 
 def _run_task(args: tuple[SiteConfig, str, SimConfig]) -> Results:

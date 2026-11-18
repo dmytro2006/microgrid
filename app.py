@@ -13,14 +13,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-from microgrid.analysis import InvestmentCosts, monte_carlo, sizing_grid, summarize
-from microgrid.animation import animated_map_html, flow_diagram_html
-from microgrid.config import KRAKOW_SITES, SimConfig
+from microgrid.analysis import InvestmentCosts, best_contract, contract_sweep, monte_carlo, sizing_grid, summarize
+from microgrid.animation import animated_map_html, flow_diagram_html, sankey_html, station_html
+from microgrid.config import ALL_SITES, SimConfig
 from microgrid.controller import CONTROLLERS
 from microgrid.map_view import build_deck
 from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table, kpis
-from microgrid.plots import (plot_cost_breakdown, plot_grid_comparison, plot_kpi_bars, plot_monte_carlo,
-                             plot_real_inputs, plot_sizing_heatmap, plot_timeseries)
+from microgrid.plots import (plot_contract_sweep, plot_cost_breakdown, plot_grid_comparison, plot_kpi_bars,
+                             plot_monte_carlo, plot_real_inputs, plot_sizing_heatmap, plot_timeseries)
 from microgrid.report import build_report
 from microgrid.simulation import run_all
 from microgrid.tariff import DEFAULT_TARIFF
@@ -49,14 +49,22 @@ with st.sidebar:
                         format_func=lambda x: {"perfect": "doskonała", "persistence": "z wczoraj"}[x],
                         help="Doskonała = górne ograniczenie jakości; „z wczoraj” = odbiory/PV/wiatr "
                              "z poprzedniej doby (ceny RCE znane z wyprzedzeniem).")
+    ev_fc = st.toggle("MPC: prognoza przyjazdów EV", value=True,
+                      help="Plan rezerwuje moc i energię dla aut, które statystycznie dopiero przyjadą.")
 
     st.header("Lokalizacja")
-    names = [s.name for s in KRAKOW_SITES]
+    all_names = [s.name for s in ALL_SITES]
+    chosen = st.multiselect("Węzły w symulacji", all_names, default=all_names,
+                            help="9 węzłów w Krakowie; nowe – w miejscach skupisk ładowarek z OpenStreetMap.")
+    names = chosen or all_names[:1]
     site_name = st.selectbox("Węzeł do edycji / analizy", names)
-    base = next(s for s in KRAKOW_SITES if s.name == site_name)
-    n_ch = st.slider("Liczba ładowarek", 2, 30, base.n_chargers)
-    evd = st.slider("Pojazdy EV / dobę", 5, 200, int(base.ev_per_day))
-    pmax = st.slider("P_max / moc umowna [kW]", 50, 600, int(base.p_max_kw), step=10)
+    base = next(s for s in ALL_SITES if s.name == site_name)
+    n_ch = st.slider("Liczba ładowarek", 2, 40, base.n_chargers)
+    evd = st.slider("Pojazdy EV / dobę", 5, 250, int(base.ev_per_day))
+    pmax = st.slider("P_max przyłącza [kW]", 50, 800, int(base.p_max_kw), step=2,
+                     help="Typoszereg transformatorów: 160/250/400/630 kVA ≈ 152/238/380/600 kW przy cos φ = 0.95")
+    pcon = st.slider("Moc umowna [kW]", 30, int(pmax), int(min(base.p_contract, pmax)), step=2,
+                     help="Podstawa opłaty stałej i kar; EMS pilnuje min(moc umowna, P_max).")
     load_types = ["kse", "residential", "office", "commercial"]
     load_type = st.selectbox("Typ odbiorcy (dane rzeczywiste)", load_types, index=load_types.index(base.load_type),
                              format_func=lambda x: {"kse": "kształt KSE", "residential": "osiedle",
@@ -69,11 +77,12 @@ with st.sidebar:
     v2g = st.slider("Udział EV z V2G [%]", 0, 100, int(100 * base.v2g_share), step=5)
 
 edited = base.with_(n_chargers=n_ch, ev_per_day=float(evd), p_max_kw=float(pmax), pv_kwp=float(pv),
+                    p_contract_kw=None if pcon >= pmax else float(pcon),
                     wind_rated_kw=float(wind), bess_kwh=float(bess_kwh), bess_p_kw=float(bess_kw),
                     v2g_share=v2g / 100, load_type=load_type)
-sites = [edited if s.name == site_name else s for s in KRAKOW_SITES]
+sites = [edited if s.name == site_name else s for s in ALL_SITES if s.name in names]
 cfg = SimConfig(days=days, dt_min=int(dt), seed=int(seed), data_source=source,
-                ev_fleet="real" if fleet else "synthetic", forecast=forecast,
+                ev_fleet="real" if fleet else "synthetic", forecast=forecast, mpc_ev_forecast=ev_fc,
                 start=f"{start:%Y-%m-%d} 00:00" if source == "real" else SimConfig.start)
 caption.caption(
     "Hybrydowa symulacja DES (SimPy) + krok bilansowy Δt. Dane wejściowe: " +
@@ -121,11 +130,31 @@ tab_anim, tab_ts, tab_cmp, tab_map, tab_in, tab_ev, tab_an = st.tabs(
 
 # ---------------- Animacja ----------------
 with tab_anim:
-    a_strategy = st.radio("Scenariusz", list(CONTROLLERS), format_func=lambda k: CONTROLLERS[k].label,
-                          horizontal=True, key="anim_strategy", index=3)
-    st.caption("Przepływy mocy w węźle PCC – grubość i prędkość ∝ mocy, kierunek kropek = kierunek przepływu. "
-               "Odtwarzanie działa w przeglądarce (▶, suwak, tempo).")
-    st.iframe(flow_diagram_html(results[(site_name, a_strategy)]), height=640)
+    view = st.radio("Widok", ["schemat", "parking", "porownanie", "sankey"], horizontal=True,
+                    format_func=lambda x: {"schemat": "⚡ Schemat węzła", "parking": "🅿️ Parking stacji",
+                                           "porownanie": "🆚 Porównanie strategii", "sankey": "🔀 Sankey"}[x])
+    if view == "porownanie":
+        c1, c2 = st.columns(2)
+        sa = c1.selectbox("Lewa", list(CONTROLLERS), index=0, format_func=lambda k: CONTROLLERS[k].label)
+        sb = c2.selectbox("Prawa", list(CONTROLLERS), index=3, format_func=lambda k: CONTROLLERS[k].label)
+    else:
+        a_strategy = st.radio("Scenariusz", list(CONTROLLERS), format_func=lambda k: CONTROLLERS[k].label,
+                              horizontal=True, key="anim_strategy", index=3)
+    ra = results[(site_name, a_strategy)] if view != "porownanie" else None
+    if view == "schemat":
+        st.caption("Przepływy mocy w węźle PCC – grubość i prędkość ∝ mocy, kierunek kropek = kierunek przepływu.")
+        st.iframe(flow_diagram_html(ra), height=640)
+    elif view == "parking":
+        st.caption("Auta wjeżdżają na stanowiska i odjeżdżają; kolor: 🟧 ładowanie · 🟩 V2G · 🟦 naładowane · "
+                   "⬜ czeka. Pasek = SoC, kreska = cel. Najedź na auto, aby zobaczyć model.")
+        st.iframe(station_html([ra]), height=620)
+    elif view == "porownanie":
+        st.caption("Ten sam strumień pojazdów i pogody, dwa algorytmy sterowania – wspólny odtwarzacz.")
+        st.iframe(station_html([results[(site_name, sa)], results[(site_name, sb)]]), height=640)
+    else:
+        st.caption("Skąd pochodzi energia i dokąd płynie – chwilowo lub narastająco.")
+        st.iframe(sankey_html(ra), height=540)
+    st.caption("Odtwarzanie działa w przeglądarce (▶, suwak, tempo).")
 
 # ---------------- Przebiegi ----------------
 with tab_ts:
@@ -135,8 +164,8 @@ with tab_ts:
     cols = st.columns(7)
     for col, (m, better_low) in zip(cols, [("T_over [min/doba]", True), ("dP_over_max [kW]", True),
                                            ("SSR_import [%]", False), ("UDR [%]", True),
-                                           ("Koszt całk. [PLN]", True), ("Kara moc umowna [PLN]", True),
-                                           ("EFC [-]", True)]):
+                                           ("UDR wykonalne [%]", True), ("Koszt całk. [PLN]", True),
+                                           ("Utrata SoH BESS [%]", True)]):
         delta = k_now[m] - k_base[m]
         col.metric(m, f"{k_now[m]:.2f}", f"{delta:+.2f} vs A" if strategy != "A" else None,
                    delta_color="inverse" if better_low else "normal")
@@ -228,7 +257,7 @@ with tab_an:
     n_mc = c1.slider("Liczba powtórzeń", 3, 40, 10)
     mc_strats = c2.multiselect("Strategie", list(CONTROLLERS), default=list(CONTROLLERS),
                                format_func=lambda k: CONTROLLERS[k].label)
-    mc_metrics = ["T_over [min/doba]", "UDR [%]", "Koszt całk. [PLN]", "SSR_import [%]"]
+    mc_metrics = ["T_over [min/doba]", "UDR wykonalne [%]", "Koszt całk. [PLN]", "SSR_import [%]"]
     if st.button("▶ Uruchom Monte Carlo") and mc_strats:
         with st.spinner(f"{n_mc} × {len(mc_strats)} symulacji…"):
             st.session_state["mc"] = monte_carlo(edited, cfg, tuple(mc_strats), n_mc)
@@ -261,6 +290,26 @@ with tab_an:
         cost_txt = f"{best['Koszt łączny [PLN]']:,.0f}".replace(",", " ")
         st.success(f"Minimum kosztu łącznego: PV **{best['P_PV [kWp]']:g} kWp**, BESS **{best['E_BESS [kWh]']:g} kWh** "
                    f"→ {cost_txt} PLN w horyzoncie")
+
+    st.divider()
+    st.subheader("Dobór mocy umownej")
+    st.caption("Niższa moc umowna = niższa opłata stała, ale EMS musi mocniej ograniczać pobór (rośnie UDR), "
+               "a bez sterowania (A) – kary za przekroczenia.")
+    c1, c2 = st.columns([2, 1])
+    ct_strats = c1.multiselect("Strategie ", list(CONTROLLERS), default=["A", "C", "D"],
+                               format_func=lambda k: CONTROLLERS[k].label)
+    udr_pen = c2.number_input("Kara za 1 p.p. UDR wykonalnego [PLN]", 0, 5000, 0, step=100,
+                              help="Wycena niezadowolenia klientów – przesuwa optimum w stronę wyższej mocy.")
+    if st.button("▶ Przelicz moc umowną") and ct_strats:
+        vals = sorted({int(round(edited.p_max_kw * f)) for f in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)})
+        with st.spinner(f"{len(vals) * len(ct_strats)} symulacji…"):
+            st.session_state["contract"] = contract_sweep(edited, cfg, tuple(ct_strats), vals)
+    if "contract" in st.session_state:
+        ct = st.session_state["contract"]
+        show(plot_contract_sweep(ct))
+        best = best_contract(ct, udr_pen)[["P_umowna [kW]", "Koszt całk. [PLN]", "UDR wykonalne [%]",
+                                           "Opł. stała [PLN]", "Kara moc umowna [PLN]"]]
+        st.dataframe(best.style.format("{:.1f}"), width="stretch")
 
     st.divider()
     st.subheader("Parametry taryfy (orientacyjne)")

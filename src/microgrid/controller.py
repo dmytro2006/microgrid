@@ -67,7 +67,7 @@ class PeakShavingController(Controller):
     valley = 0.50  # doładowanie BESS z sieci w dolinie obciążenia
 
     def decide(self, s: SiteState) -> Decision:
-        p_max = s.site.p_max_kw
+        p_max = s.site.p_limit_kw
         p_ev = {ev.id: ev.max_charge_kw(s.dt_h) for ev in s.active}
         ev_sum = sum(p_ev.values())
         p_pred = s.p_net + ev_sum
@@ -98,7 +98,7 @@ class SmartController(Controller):
 
     def decide(self, s: SiteState) -> Decision:
         dt_h = s.dt_h
-        p_lim = self.safety * s.site.p_max_kw
+        p_lim = self.safety * s.site.p_limit_kw
         p_net = s.p_net
         cheap = s.price_signal <= s.price_low
         expensive = s.price_signal >= s.price_high

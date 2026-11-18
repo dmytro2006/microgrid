@@ -94,6 +94,14 @@ def map_layers_data(results: list[Results], k: int) -> tuple[list[dict], list[di
     return nodes, flows, labels
 
 
+def fit_zoom(lats: list[float], lons: list[float]) -> float:
+    """Przybliżenie mapy obejmujące wszystkie węzły (z marginesem)."""
+    import math
+
+    span = max(max(lats) - min(lats), (max(lons) - min(lons)) * 0.64, 0.02)
+    return max(10.0, min(13.0, math.log2(360 / span) - 1.6))
+
+
 def chargers_data() -> list[dict]:
     """Rzeczywiste stacje ładowania z OSM (cache) w formacie warstw mapy; [] gdy brak danych."""
     from .osm import load_chargers
@@ -115,8 +123,8 @@ def build_deck(results: list[Results], k: int, show_chargers: bool = True) -> pd
     nodes, flows, labels = map_layers_data(results, k)
     lats = [r.site.lat for r in results]
     lons = [r.site.lon for r in results]
-    view = pdk.ViewState(latitude=sum(lats) / len(lats), longitude=sum(lons) / len(lons),
-                         zoom=12.2, pitch=40, bearing=0)
+    view = pdk.ViewState(latitude=(max(lats) + min(lats)) / 2, longitude=(max(lons) + min(lons)) / 2,
+                         zoom=fit_zoom(lats, lons), pitch=40, bearing=0)
     layers = [
         pdk.Layer("ArcLayer", flows, get_source_position="source", get_target_position="target",
                   get_source_color="c_src", get_target_color="c_dst", get_width="width",

@@ -34,6 +34,7 @@ def main() -> None:
     ap.add_argument("--forecast", default="perfect", choices=["perfect", "persistence"], help="prognoza dla MPC (D)")
     ap.add_argument("--strategies", default="ABCD", help="podzbiór strategii, np. ABC")
     ap.add_argument("--report", action="store_true", help="zapisz raport HTML (raport.html)")
+    ap.add_argument("--no-ev-forecast", action="store_true", help="MPC bez prognozy przyjazdów EV")
     ap.add_argument("--sites", nargs="*", help="podciągi nazw lokalizacji (domyślnie wszystkie)")
     ap.add_argument("--out", default="out")
     ap.add_argument("--dpi", type=int, default=200, help="rozdzielczość plików PNG")
@@ -46,17 +47,18 @@ def main() -> None:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from microgrid.config import KRAKOW_SITES, SimConfig
+    from microgrid.config import ALL_SITES, SimConfig
     from microgrid.map_view import build_deck
     from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table
     from microgrid.plots import plot_grid_comparison, plot_kpi_bars, plot_timeseries
     from microgrid.simulation import run_all
 
-    sites = KRAKOW_SITES
+    sites = ALL_SITES
     if args.sites:
         sites = [s for s in sites if any(q.lower() in s.name.lower() for q in args.sites)]
     cfg = SimConfig(days=args.days, dt_min=args.dt, seed=args.seed, start=f"{args.start} 00:00",
-                    data_source=args.data, ev_fleet=args.fleet, forecast=args.forecast)
+                    data_source=args.data, ev_fleet=args.fleet, forecast=args.forecast,
+                    mpc_ev_forecast=not args.no_ev_forecast)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -108,12 +110,17 @@ def main() -> None:
         if strategy == map_strats[0]:
             k_peak = k
     if args.anim:
-        from microgrid.animation import animated_map_html, flow_diagram_html
+        from microgrid.animation import animated_map_html, flow_diagram_html, sankey_html, station_html
         for strategy in dict.fromkeys(map_strats):
             rs = [results[(s.name, strategy)] for s in sites]
             (out / f"anim_map_{strategy}.html").write_text(animated_map_html(rs, start_k=k_peak), encoding="utf-8")
             for r in rs:
                 (out / f"anim_{slug(r.site.name)}_{strategy}.html").write_text(flow_diagram_html(r), encoding="utf-8")
+                (out / f"sankey_{slug(r.site.name)}_{strategy}.html").write_text(sankey_html(r), encoding="utf-8")
+        strats = list(dict.fromkeys(map_strats))
+        for s in sites:
+            rr = [results[(s.name, st)] for st in strats]
+            (out / f"parking_{slug(s.name)}.html").write_text(station_html(rr), encoding="utf-8")
         print(f"Animacje: {out}/anim_*.html")
     if cfg.data_source == "real":
         from microgrid.plots import plot_real_inputs

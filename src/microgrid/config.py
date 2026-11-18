@@ -81,7 +81,8 @@ class SiteConfig:
     ev_per_day: float = 60.0
     v2g_share: float = 0.3
     # transformator / PCC
-    p_max_kw: float = 250.0
+    p_max_kw: float = 250.0              # zdolność przyłącza / transformatora (limit techniczny)
+    p_contract_kw: float | None = None   # moc umowna (taryfa); None → równa p_max_kw
     # odbiory bazowe
     base_load_peak_kw: float = 160.0
     load_type: str = "kse"  # tryb "real": "kse" | "residential" | "office" | "commercial"
@@ -104,6 +105,15 @@ class SiteConfig:
     bess_soc_init: float = 0.50
 
     @property
+    def p_contract(self) -> float:
+        return self.p_max_kw if self.p_contract_kw is None else self.p_contract_kw
+
+    @property
+    def p_limit_kw(self) -> float:
+        """Limit, którego pilnuje EMS: mniejsza z mocy umownej i zdolności przyłącza."""
+        return min(self.p_max_kw, self.p_contract)
+
+    @property
     def wind_rotor_area_m2(self) -> float:
         """Powierzchnia wirnika dobrana tak, by krzywa mocy była ciągła w v_rated."""
         return self.wind_rated_kw * 1000.0 / (0.5 * self.wind_cp * RHO_AIR * self.wind_v_rated**3)
@@ -121,6 +131,7 @@ class SimConfig:
     data_source: str = "synthetic"   # "synthetic" | "real" (Open-Meteo + PSE)
     ev_fleet: str = "synthetic"      # "synthetic" | "real" (modele EV_MODELS + ładowarki AC/DC)
     forecast: str = "perfect"        # prognoza dla MPC: "perfect" | "persistence" (wczorajszy profil)
+    mpc_ev_forecast: bool = True     # MPC uwzględnia oczekiwane przyjazdy EV (rezerwa mocy / energii)
     ev: EVParams = field(default_factory=EVParams)
 
     @property
@@ -157,6 +168,44 @@ KRAKOW_SITES: list[SiteConfig] = [
         pv_kwp=100, wind_rated_kw=0, bess_kwh=300, bess_p_kw=150, v2g_share=0.2, load_type="commercial",
     ),
 ]
+
+# Dodatkowe węzły w miejscach, gdzie OpenStreetMap pokazuje skupiska ładowarek
+# (data/cache/osm_chargers_krakow.csv, stan 11.2026; liczba stanowisk ≈ suma ``capacity``
+# stacji OSM w promieniu 500 m, dla Bonarki ograniczona do modelowanego hubu).
+# Moc przyłącza wg typoszeregu transformatorów SN/nN (160/250/400/630 kVA, cos φ = 0.95).
+KRAKOW_SITES_EXTRA: list[SiteConfig] = [
+    SiteConfig(
+        name="Bonarka / Podgórze", lat=50.0255, lon=19.9555,  # OSM: 32 stacje / 125 pkt, Tesla SC 250 kW
+        n_chargers=30, queue_cap=8, ev_per_day=140, p_max_kw=600, base_load_peak_kw=420, load_type="commercial",
+        pv_kwp=300, wind_rated_kw=0, bess_kwh=500, bess_p_kw=250, v2g_share=0.2,
+    ),
+    SiteConfig(
+        name="Ruczaj / Kampus UJ", lat=50.0125, lon=19.8870,  # OSM: 11 stacji / 22 pkt (Elocity, Leroy Merlin)
+        n_chargers=22, ev_per_day=80, p_max_kw=380, base_load_peak_kw=240, load_type="office",
+        pv_kwp=200, wind_rated_kw=0, bess_kwh=300, bess_p_kw=150, v2g_share=0.3,
+    ),
+    SiteConfig(
+        name="Dworzec Główny", lat=50.0690, lon=19.9465,  # OSM: 5 stacji / 13 pkt
+        n_chargers=13, ev_per_day=70, p_max_kw=238, base_load_peak_kw=150, load_type="commercial",
+        pv_kwp=60, wind_rated_kw=0, bess_kwh=150, bess_p_kw=75, v2g_share=0.1,
+    ),
+    SiteConfig(
+        name="Czyżyny", lat=50.0645, lon=20.0000,  # OSM: GreenWay 50 kW + GO+EAuto 22 kW
+        n_chargers=8, ev_per_day=35, p_max_kw=152, base_load_peak_kw=100, load_type="residential",
+        pv_kwp=60, wind_rated_kw=10, bess_kwh=100, bess_p_kw=50, v2g_share=0.4,
+    ),
+    SiteConfig(
+        name="Bieżanów-Prokocim", lat=49.9885, lon=20.0450,  # OSM: 5 stacji / 14 pkt
+        n_chargers=14, ev_per_day=45, p_max_kw=238, base_load_peak_kw=160, load_type="residential",
+        pv_kwp=90, wind_rated_kw=0, bess_kwh=150, bess_p_kw=75, v2g_share=0.4,
+    ),
+    SiteConfig(
+        name="Prądnik Biały", lat=50.0945, lon=19.9510,  # OSM: GO+EAuto 8 pkt + Lidl
+        n_chargers=10, ev_per_day=40, p_max_kw=152, base_load_peak_kw=110, load_type="residential",
+        pv_kwp=50, wind_rated_kw=0, bess_kwh=120, bess_p_kw=60, v2g_share=0.4,
+    ),
+]
+ALL_SITES: list[SiteConfig] = KRAKOW_SITES + KRAKOW_SITES_EXTRA
 
 # Umowny punkt zasilania z sieci nadrzędnej (GPZ) – do wizualizacji na mapie.
 GRID_SUPPLY_POINT = {"name": "GPZ – sieć nadrzędna (umowny)", "lat": 50.0600, "lon": 19.9800}

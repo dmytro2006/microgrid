@@ -110,8 +110,13 @@ def _cached(prefix: str, d0: pd.Timestamp, d1: pd.Timestamp, fetch) -> pd.DataFr
 
 
 # ---------------------------------------------------------------- Open-Meteo
+WEATHER_GRID_DEG = 0.1  # rozdzielczość modeli (~9–11 km) – pobliskie węzły dzielą jedną komórkę
+
+
 def fetch_weather(lat: float, lon: float, d0: pd.Timestamp, d1: pd.Timestamp) -> pd.DataFrame:
     """Godzinowe dane pogodowe [UTC]: gti [W/m²], temp [°C], v10, v100 [m/s]."""
+    lat = round(lat / WEATHER_GRID_DEG) * WEATHER_GRID_DEG
+    lon = round(lon / WEATHER_GRID_DEG) * WEATHER_GRID_DEG
     def fetch(d0: pd.Timestamp, d1: pd.Timestamp) -> pd.DataFrame:
         q = urllib.parse.urlencode({
             "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
@@ -134,7 +139,7 @@ def fetch_weather(lat: float, lon: float, d0: pd.Timestamp, d1: pd.Timestamp) ->
         df.index.name = "time_utc"
         return df.dropna(how="all")
 
-    return _cached(f"weather_{lat:.3f}_{lon:.3f}", d0, d1, fetch)
+    return _cached(f"weather_{lat:.1f}_{lon:.1f}", d0, d1, fetch)
 
 
 # ---------------------------------------------------------------- PSE

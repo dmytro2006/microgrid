@@ -75,6 +75,31 @@ class MPCController(Controller):
             out[key] = (cs[idx[1:]] - cs[idx[:-1]]) / np.diff(idx)
         return out
 
+    # ------------------------------------------------------------ oczekiwane przyjazdy
+    def _virtual_agents(self, s: SiteState, B: np.ndarray) -> list[dict]:
+        """Grupa oczekiwanych przyjazdów w każdym przyszłym kroku LP jako jeden zagregowany pojazd.
+
+        n_j = Σ λ·Δt w kroku j; potrzebna energia n_j·E̅, moc n_j·P̄ (≤ wolne ładowarki),
+        postój = średni czas postoju dla godziny przyjazdu. Kara za niedoładowanie jak dla
+        prawdziwych pojazdów – plan zostawia więc margines mocy i energii BESS na przyszłe auta.
+        """
+        f = s.forecast
+        lam, park, mu = f["ev_arrivals"], f["ev_park_h"], f["ev_means"]
+        idx = (s.k + B / s.dt_min).astype(int)
+        cs = np.concatenate([[0.0], np.cumsum(lam)])
+        out = []
+        for j in range(1, len(B) - 1):
+            n_j = cs[idx[j + 1]] - cs[idx[j]]
+            if n_j < 1e-3:
+                continue
+            t_a = s.t_min + B[j]
+            out.append({
+                "id": ("virt", j), "t_a": t_a, "t_d": t_a + 60.0 * float(park[min(idx[j], len(park) - 1)]),
+                "e0": 0.0, "e_tgt": n_j * mu["e_need"], "e_floor": 0.0,
+                "p": min(n_j, s.site.n_chargers) * mu["p"], "v2g": False, "pen": M_SHORTFALL,
+            })
+        return out
+
     # ------------------------------------------------------------ LP
     def _solve(self, s: SiteState) -> dict:
         B = self._grid(s)
@@ -83,7 +108,7 @@ class MPCController(Controller):
         fc = self._forecast(s, B)
         n = len(Lmin)
         site, bess = s.site, s.bess
-        p_lim = self.safety * site.p_max_kw
+        p_lim = self.safety * site.p_limit_kw
         t0 = s.t_min
 
         cols: list[float] = []      # współczynniki celu
@@ -107,44 +132,53 @@ class MPCController(Controller):
         ch = [var(Lh[j] * (wear - v_term * eta), 0, bess.p_rated) for j in range(n)] if has_bess else []
         dis = [var(Lh[j] * (wear + v_term / eta), 0, bess.p_rated) for j in range(n)] if has_bess else []
 
-        ev_vars: dict[int, tuple[list[int], list[int]]] = {}
+        # --- agenci EV: pojazdy podłączone + „wirtualne” grupy oczekiwanych przyjazdów ---
+        floor = s.v2g_soc_floor
+        agents = []
+        for ev in s.active:
+            e0 = ev.soc * ev.cap_kwh
+            agents.append({
+                "id": ev.id, "t_a": t0, "t_d": ev.t_dep, "e0": e0,
+                "e_tgt": max(e0, ev.soc_target * ev.cap_kwh),
+                "e_floor": min(e0, floor * ev.cap_kwh) if ev.v2g else e0,
+                "p": ev.p_max_kw, "v2g": ev.v2g, "pen": M_SHORTFALL,
+            })
+        if "ev_arrivals" in s.forecast:
+            agents += self._virtual_agents(s, B)
+
+        ev_vars: dict = {}
+        ev_frac: dict = {}
         rows_ub: list[tuple[dict[int, float], float]] = []
         rows_eq: list[tuple[dict[int, float], float]] = []
-        floor = s.v2g_soc_floor
-        for ev in s.active:
-            # frac_j – część kroku j, w której pojazd jest jeszcze podłączony
-            frac = np.clip((ev.t_dep - t0 - B[:-1]) / Lmin, 0.0, 1.0)
-            m = int(np.count_nonzero(frac > 0))
-            if m == 0:
+        for ag in agents:
+            # frac_j – część kroku j, w której pojazd jest podłączony
+            frac = np.clip((np.minimum(ag["t_d"], t0 + B[1:]) - np.maximum(ag["t_a"], t0 + B[:-1])) / Lmin, 0.0, 1.0)
+            idx = np.flatnonzero(frac > 0)
+            if len(idx) == 0:
                 continue
-            e0 = ev.soc * ev.cap_kwh
-            e_tgt = max(e0, ev.soc_target * ev.cap_kwh)
-            e_floor = min(e0, floor * ev.cap_kwh) if ev.v2g else e0
-            c = [var(EPS_EARLY * j, 0, ev.p_max_kw) for j in range(m)]
-            d = [var(EPS_EARLY, 0, ev.p_max_kw) for j in range(m)] if ev.v2g else []
-            e = [var(0.0, e_floor, e_tgt) for _ in range(m)]          # energia po kroku j
-            ev_vars[ev.id] = (c, d)
-            for j in range(m):
+            js = list(range(idx[0], idx[-1] + 1))
+            c = {j: var(EPS_EARLY * j, 0, ag["p"]) for j in js}
+            d = {j: var(EPS_EARLY, 0, ag["p"]) for j in js} if ag["v2g"] else {}
+            e = {j: var(0.0, ag["e_floor"], ag["e_tgt"]) for j in js}          # energia po kroku j
+            ev_vars[ag["id"]] = (c, d)
+            ev_frac[ag["id"]] = frac
+            for j in js:
                 coef = {e[j]: 1.0, c[j]: -Lh[j] * frac[j]}
                 if d:
                     coef[d[j]] = Lh[j] * frac[j]
-                if j:
+                if j != js[0]:
                     coef[e[j - 1]] = -1.0
-                rows_eq.append((coef, e0 if j == 0 else 0.0))
-            sv = var(M_SHORTFALL, 0, None)
-            rows_ub.append(({e[m - 1]: -1.0, sv: -1.0}, -e_tgt))               # E_dep + s ≥ E_target
+                rows_eq.append((coef, ag["e0"] if j == js[0] else 0.0))
+            sv = var(ag["pen"], 0, None)
+            rows_ub.append(({e[js[-1]]: -1.0, sv: -1.0}, -ag["e_tgt"]))         # E_dep + s ≥ E_target
 
         # bilans PCC i limity mocy (moc EV w kroku j działa tylko przez frac_j kroku)
-        ev_frac = {}
-        for ev in s.active:
-            if ev.id in ev_vars:
-                ev_frac[ev.id] = np.clip((ev.t_dep - t0 - B[:-1]) / Lmin, 0.0, 1.0)
         for j in range(n):
             coef = {imp[j]: 1.0, exp[j]: -1.0}
             for i, (c, d) in ev_vars.items():
-                if j < len(c):
+                if j in c:
                     coef[c[j]] = -ev_frac[i][j]
-                if j < len(d):
+                if j in d:
                     coef[d[j]] = ev_frac[i][j]
             if has_bess:
                 coef[ch[j]] = -1.0
@@ -191,8 +225,9 @@ class MPCController(Controller):
         if res.status != 0:
             return {"t0": t0, "B": B, "ev": {}, "bess": None, "ids": frozenset(ev.id for ev in s.active)}
         x = res.x
-        plan_ev = {i: np.array([x[a] for a in c]) - (np.array([x[a] for a in d]) if d else 0.0)
-                   for i, (c, d) in ev_vars.items()}
+        real_ids = {ev.id for ev in s.active}
+        plan_ev = {i: np.array([x[c[j]] - (x[d[j]] if d else 0.0) for j in sorted(c)])
+                   for i, (c, d) in ev_vars.items() if i in real_ids}
         plan_bess = (np.array([x[a] for a in ch]) - np.array([x[a] for a in dis])) if has_bess else None
         return {"t0": t0, "B": B, "ev": plan_ev, "bess": plan_bess, "ids": frozenset(ev.id for ev in s.active)}
 
@@ -216,7 +251,7 @@ class MPCController(Controller):
         p_bess = float(P["bess"][j]) if P["bess"] is not None and j < len(P["bess"]) else 0.0
 
         # --- korekta czasu rzeczywistego (rzeczywista moc chwilowa ≠ średnia z prognozy) ---
-        p_lim = self.safety * s.site.p_max_kw
+        p_lim = self.safety * s.site.p_limit_kw
         p_ev_lim = {e.id: (e.max_charge_kw(s.dt_h) if p_ev[e.id] >= 0
                            else -e.max_discharge_kw(s.t_min, s.dt_h, s.v2g_soc_floor)) for e in s.active}
         p_ev = {k: (min(v, p_ev_lim[k]) if v >= 0 else max(v, p_ev_lim[k])) for k, v in p_ev.items()}

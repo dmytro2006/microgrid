@@ -240,3 +240,25 @@ def plot_sizing_heatmap(df: pd.DataFrame, metric: str = "Koszt łączny [PLN]") 
     ax.set_title(f"Dobór PV × BESS – {metric} (ramka = minimum)", fontweight="bold", fontsize=9)
     fig.tight_layout()
     return fig
+
+
+def plot_contract_sweep(df: pd.DataFrame) -> plt.Figure:
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.4))
+    for st, g in df.groupby("Scenariusz"):
+        g = g.sort_values("P_umowna [kW]")
+        x = g["P_umowna [kW]"]
+        axes[0].plot(x, g["Koszt całk. [PLN]"], "o-", color=COLORS[st], label=st, ms=3)
+        axes[1].plot(x, g["Kara moc umowna [PLN]"] + g["Opł. stała [PLN]"], "o-", color=COLORS[st], ms=3)
+        axes[2].plot(x, g["UDR wykonalne [%]"], "o-", color=COLORS[st], ms=3)
+        i = g["Koszt całk. [PLN]"].idxmin()
+        axes[0].scatter([g.loc[i, "P_umowna [kW]"]], [g.loc[i, "Koszt całk. [PLN]"]], s=80,
+                        facecolor="none", edgecolor=COLORS[st], lw=2, zorder=4)
+    for ax, t in zip(axes, ["Koszt całkowity [PLN] (○ = minimum)", "Opł. stała + kary [PLN]",
+                            "UDR wykonalne [%]"]):
+        ax.set_title(t, fontsize=9)
+        ax.set_xlabel("Moc umowna [kW]")
+        ax.grid(alpha=0.3)
+    axes[0].legend(title="Scenariusz", fontsize=7)
+    fig.suptitle("Dobór mocy umownej", fontweight="bold")
+    fig.tight_layout()
+    return fig

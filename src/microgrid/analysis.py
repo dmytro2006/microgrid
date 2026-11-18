@@ -95,3 +95,28 @@ def sizing_grid(site: SiteConfig, cfg: SimConfig, strategy: str, pv_values, bess
     df["Inwestycja [PLN]"] = [inv.per_day(pv, e) * cfg.days for pv, e in keys]
     df["Koszt łączny [PLN]"] = df["Koszt całk. [PLN]"] + df["Inwestycja [PLN]"]
     return df
+
+
+def contract_sweep(site: SiteConfig, cfg: SimConfig, strategies, values, n_jobs: int | None = None) -> pd.DataFrame:
+    """Przegląd mocy umownej (≤ zdolność przyłącza): opłata stała ↔ kary ↔ niedoładowanie EV.
+
+    EMS pilnuje min(P_umowna, P_max), więc niższa moc umowna obniża składnik stały, ale
+    ogranicza ładowanie (rośnie UDR) i – w scenariuszu A – generuje kary.
+    """
+    tasks, keys = [], []
+    for v in values:
+        s = site.with_(p_contract_kw=float(v))
+        for st in strategies:
+            tasks.append((s, st, cfg))
+            keys.append((v, st))
+    rows = _map(tasks, n_jobs)
+    df = pd.DataFrame(rows)
+    df.insert(0, "Scenariusz", [k[1] for k in keys])
+    df.insert(0, "P_umowna [kW]", [k[0] for k in keys])
+    return df
+
+
+def best_contract(df: pd.DataFrame, udr_penalty_pln: float = 0.0) -> pd.DataFrame:
+    """Najtańsza moc umowna dla każdej strategii (opcjonalnie z karą za każdy p.p. UDR)."""
+    d = df.assign(cel=df["Koszt całk. [PLN]"] + udr_penalty_pln * df["UDR wykonalne [%]"])
+    return d.loc[d.groupby("Scenariusz")["cel"].idxmin()].set_index("Scenariusz")
