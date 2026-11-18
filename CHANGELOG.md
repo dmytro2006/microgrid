@@ -2,6 +2,17 @@
 
 Wszystkie zmiany na gałęzi `feature/real-data-animations` względem `master` (`092cb05 Initial commit`).
 
+## [0.4.1] – 2026-11-18 · poprawka: panel ładował się kilkanaście minut
+
+### Naprawione
+- **Panel uruchamiał się rekurencyjnie w procesach roboczych.** Streamlit wykonuje `app.py` jako moduł `__main__`,
+  a procesy puli (forkserver/spawn) importują `__main__` ponownie. Każdy worker uruchamiał więc cały panel
+  z własną symulacją wszystkich węzłów i własną pulą. Objaw: setki ostrzeżeń
+  `missing ScriptRunContext` i ładowanie rzędu 15 min.
+  - Panel jest teraz w funkcji `main()` wywoływanej tylko przy `__name__ == "__main__"`.
+  - `parallel_map` nie tworzy puli wewnątrz procesu roboczego.
+  - Pierwsze ładowanie panelu (9 węzłów × 4 strategie, 2 doby): ok. 25–30 s, kolejne z pamięci podręcznej.
+
 ## [0.4.0] – 2026-11-18 · prognoza przyjazdów, moc umowna, starzenie BESS, nowe animacje, 9 węzłów
 
 ### Dodane

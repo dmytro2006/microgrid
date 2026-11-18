@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
 import zlib
@@ -168,7 +169,8 @@ def _can_spawn() -> bool:
 def parallel_map(fn, tasks: list, n_jobs: int | None = None) -> list:
     """``map`` w puli procesów (gdy się da i opłaca), w przeciwnym razie sekwencyjnie."""
     n_jobs = n_jobs if n_jobs is not None else min(len(tasks), os.cpu_count() or 1)
-    if n_jobs > 1 and len(tasks) > 1 and _can_spawn():
+    in_worker = multiprocessing.parent_process() is not None  # bez zagnieżdżonych pul
+    if n_jobs > 1 and len(tasks) > 1 and not in_worker and _can_spawn():
         try:
             with ProcessPoolExecutor(max_workers=n_jobs) as ex:
                 return list(ex.map(fn, tasks))
