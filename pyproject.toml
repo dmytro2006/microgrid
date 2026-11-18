@@ -10,6 +10,7 @@ dependencies = [
     "matplotlib>=3.8",
     "streamlit>=1.38",
     "pydeck>=0.9",
+    "scipy>=1.13",
 ]
 
 [dependency-groups]

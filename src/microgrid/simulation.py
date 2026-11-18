@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import zlib
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 
 import numpy as np
@@ -14,6 +18,7 @@ from .controller import CONTROLLERS, SiteState
 from .ev_generator import EV, TICK_EPS, Station, generate_evs
 from .grid_environment import BESS, pcc_balance
 from .synthetic import generate_profiles
+from .tariff import DEFAULT_TARIFF, import_price
 
 
 @dataclass
@@ -60,6 +65,15 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
     price_sig = (pd.Series(profiles["price"])
                  .rolling(window=max(1, 60 // cfg.dt_min), center=True, min_periods=1).mean().to_numpy())
     rows: list[dict] = []
+    times = pd.Timestamp(cfg.start) + pd.to_timedelta(np.arange(cfg.n_steps) * cfg.dt_min, unit="min")
+    fc_src = {key: profiles[key].copy() for key in ("load", "pv", "wind")}
+    if cfg.forecast == "persistence":  # prognoza = ten sam kwadrans poprzedniej doby
+        for key, arr in fc_src.items():
+            arr[steps_per_day:] = profiles[key][:-steps_per_day]
+    forecast = {
+        "load": fc_src["load"], "net": fc_src["load"] - fc_src["pv"] - fc_src["wind"],
+        "p_imp": import_price(profiles["price"], times), "p_exp": profiles["price"],
+    }
 
     def ticker():
         yield env.timeout(TICK_EPS)
@@ -75,6 +89,8 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
                 price_high=float(np.percentile(prices_day, 80)),
                 active=list(station.active.values()), bess=bess, site=site,
                 v2g_soc_floor=cfg.ev.v2g_soc_floor,
+                k=k, dt_min=cfg.dt_min, forecast=forecast, tariff=DEFAULT_TARIFF,
+                p_grid_prev=rows[-1]["p_grid"] if rows else 0.0,
             )
             p_ev_cmd, p_bess_cmd = controller.decide(state)
 
@@ -126,5 +142,31 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
     return Results(site, strategy, cfg, ts, sessions, bess.losses_kwh, bess.e_init, bess.energy, raw)
 
 
-def run_all(sites: list[SiteConfig], cfg: SimConfig, strategies=("A", "B", "C")) -> dict[tuple[str, str], Results]:
-    return {(s.name, st): run(s, st, cfg) for s in sites for st in strategies}
+def _run_task(args: tuple[SiteConfig, str, SimConfig]) -> Results:
+    return run(*args)
+
+
+def _can_spawn() -> bool:
+    """Procesy potomne (forkserver/spawn) importują moduł __main__ – musi to być istniejący plik."""
+    main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+    return main_file is None or os.path.exists(main_file)
+
+
+def parallel_map(fn, tasks: list, n_jobs: int | None = None) -> list:
+    """``map`` w puli procesów (gdy się da i opłaca), w przeciwnym razie sekwencyjnie."""
+    n_jobs = n_jobs if n_jobs is not None else min(len(tasks), os.cpu_count() or 1)
+    if n_jobs > 1 and len(tasks) > 1 and _can_spawn():
+        try:
+            with ProcessPoolExecutor(max_workers=n_jobs) as ex:
+                return list(ex.map(fn, tasks))
+        except (OSError, RuntimeError, BrokenProcessPool):
+            pass  # środowisko bez wieloprocesowości → obliczenia sekwencyjne
+    return [fn(t) for t in tasks]
+
+
+def run_all(sites: list[SiteConfig], cfg: SimConfig, strategies=("A", "B", "C", "D"),
+            n_jobs: int | None = None) -> dict[tuple[str, str], Results]:
+    """Uruchamia wszystkie pary (lokalizacja, strategia); ``n_jobs`` > 1 → procesy równoległe."""
+    tasks = [(s, st, cfg) for s in sites for st in strategies]
+    out = parallel_map(_run_task, tasks, n_jobs)
+    return {(s.name, st): r for (s, st, _), r in zip(tasks, out)}

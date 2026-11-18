@@ -17,7 +17,9 @@ Modele przeliczeniowe:
            T_cell = T_amb + (NOCT − 20)/800 · GTI   (model NOCT),
   - wiatr: profil potęgowy dopasowany w każdej godzinie do pomiarów 10 m i 100 m
            (α = ln(v100/v10)/ln 10), v_hub = v10·(h/10)^α, następnie krzywa mocy z dokumentacji,
-  - odbiory: kształt zapotrzebowania KSE przeskalowany do mocy szczytowej węzła.
+  - odbiory: ``load_type="kse"`` – kształt zapotrzebowania KSE przeskalowany do szczytu węzła,
+             pozostałe typy – dobowe profile typowe (osiedle / biurowiec-uczelnia / handel i usługi),
+             osobno dla dni roboczych i wolnych, korygowane temperaturą (ogrzewanie / klimatyzacja).
 """
 
 from __future__ import annotations
@@ -193,6 +195,44 @@ def hub_wind_speed(v10: np.ndarray, v100: np.ndarray, hub_m: float) -> np.ndarra
     return v10 * (hub_m / 10.0) ** alpha
 
 
+# Profile typowe (godziny 0–23, wartość względna, max ≈ 1) – kształty zbliżone do profili
+# standardowych OSD dla danej kategorii odbiorców; dni wolne = sobota/niedziela.
+LOAD_SHAPES: dict[str, dict[str, list[float]]] = {
+    "residential": {
+        "work": [.45, .40, .38, .37, .38, .45, .60, .70, .62, .55, .52, .52, .55, .55, .55, .60, .70, .85, .95, 1.0, .98, .88, .72, .55],
+        "free": [.50, .45, .40, .38, .37, .38, .42, .50, .62, .70, .72, .72, .75, .72, .68, .68, .72, .82, .92, .98, .95, .86, .72, .58],
+    },
+    "office": {
+        "work": [.30, .30, .30, .30, .30, .32, .45, .70, .90, .98, 1.0, 1.0, .97, .98, .97, .92, .80, .60, .45, .38, .35, .33, .32, .30],
+        "free": [.30, .30, .30, .30, .30, .30, .30, .31, .32, .33, .33, .33, .33, .33, .33, .32, .32, .31, .31, .30, .30, .30, .30, .30],
+    },
+    "commercial": {
+        "work": [.35, .32, .30, .30, .30, .32, .40, .55, .75, .88, .95, .98, 1.0, 1.0, .98, .97, .97, .98, .97, .92, .85, .70, .50, .40],
+        "free": [.35, .32, .30, .30, .30, .32, .38, .48, .62, .75, .82, .86, .88, .88, .86, .85, .85, .85, .84, .80, .74, .62, .48, .38],
+    },
+}
+HEATING_COEF = 0.010   # wzrost zużycia na 1 K poniżej 15 °C (średnia dobowa)
+COOLING_COEF = 0.015   # wzrost zużycia na 1 K powyżej 22 °C (temperatura chwilowa)
+
+
+def typed_load(site: SiteConfig, grid_utc: pd.DatetimeIndex, temp: np.ndarray) -> np.ndarray:
+    """Profil typowy × korekta temperaturowa; ``base_load_peak_kw`` = szczyt w warunkach neutralnych."""
+    shapes = LOAD_SHAPES[site.load_type]
+    loc = grid_utc.tz_convert(TZ)
+    h = loc.hour + loc.minute / 60.0
+    hh = np.arange(25)
+    out = np.empty(len(loc))
+    for kind in ("work", "free"):
+        prof = np.array(shapes[kind] + shapes[kind][:1])
+        mask = (loc.day_of_week < 5) if kind == "work" else (loc.day_of_week >= 5)
+        out[mask] = np.interp(np.asarray(h)[mask], hh, prof)
+    if site.load_type == "commercial":
+        out[loc.day_of_week == 6] *= 0.75  # niedziele niehandlowe – czynna głównie gastronomia
+    t_day = pd.Series(temp, index=loc).groupby(loc.date).transform("mean").to_numpy()
+    factor = 1.0 + HEATING_COEF * np.clip(15.0 - t_day, 0, None) + COOLING_COEF * np.clip(temp - 22.0, 0, None)
+    return site.base_load_peak_kw * out * factor
+
+
 def real_inputs(site: SiteConfig, cfg: SimConfig) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
     """Profile wejściowe z danych rzeczywistych + ramka z surowymi danymi (do wykresów)."""
     from .synthetic import wind_power_curve  # krzywa mocy z dokumentacji (wspólna dla obu trybów)
@@ -206,7 +246,12 @@ def real_inputs(site: SiteConfig, cfg: SimConfig) -> tuple[dict[str, np.ndarray]
     v_hub = hub_wind_speed(w["v10"].to_numpy(), w["v100"].to_numpy(), site.wind_hub_m)
     wind = wind_power_curve(site, v_hub) if site.wind_rated_kw > 0 else np.zeros(cfg.n_steps)
     demand = kse["demand"].to_numpy()
-    load = site.base_load_peak_kw * demand / demand.max()
+    if site.load_type == "kse":
+        load = site.base_load_peak_kw * demand / demand.max()
+    elif site.load_type in LOAD_SHAPES:
+        load = typed_load(site, grid, w["temp"].to_numpy())
+    else:
+        raise ValueError(f"Nieznany typ odbiorcy: {site.load_type!r}")
 
     raw = pd.DataFrame({
         "gti": w["gti"].to_numpy(), "temp": w["temp"].to_numpy(), "v10": w["v10"].to_numpy(),

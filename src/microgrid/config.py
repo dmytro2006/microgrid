@@ -84,6 +84,7 @@ class SiteConfig:
     p_max_kw: float = 250.0
     # odbiory bazowe
     base_load_peak_kw: float = 160.0
+    load_type: str = "kse"  # tryb "real": "kse" | "residential" | "office" | "commercial"
     # OZE
     pv_kwp: float = 120.0
     inverter_eff: float = 0.96
@@ -119,6 +120,7 @@ class SimConfig:
     start: str = "2026-06-15 00:00"  # data startowa (czas lokalny; w trybie "real" wybiera dane)
     data_source: str = "synthetic"   # "synthetic" | "real" (Open-Meteo + PSE)
     ev_fleet: str = "synthetic"      # "synthetic" | "real" (modele EV_MODELS + ładowarki AC/DC)
+    forecast: str = "perfect"        # prognoza dla MPC: "perfect" | "persistence" (wczorajszy profil)
     ev: EVParams = field(default_factory=EVParams)
 
     @property
@@ -140,19 +142,19 @@ KRAKOW_SITES: list[SiteConfig] = [
         name="AGH / Czarna Wieś",
         lat=50.0665, lon=19.9185,
         n_chargers=12, ev_per_day=50, p_max_kw=250, base_load_peak_kw=170,
-        pv_kwp=150, wind_rated_kw=20, bess_kwh=250, bess_p_kw=120, v2g_share=0.3,
+        pv_kwp=150, wind_rated_kw=20, bess_kwh=250, bess_p_kw=120, v2g_share=0.3, load_type="office",
     ),
     SiteConfig(
         name="Nowa Huta – os. Centrum",
         lat=50.0720, lon=20.0375,
         n_chargers=10, ev_per_day=38, p_max_kw=200, base_load_peak_kw=150,
-        pv_kwp=80, wind_rated_kw=40, bess_kwh=180, bess_p_kw=90, v2g_share=0.4,
+        pv_kwp=80, wind_rated_kw=40, bess_kwh=180, bess_p_kw=90, v2g_share=0.4, load_type="residential",
     ),
     SiteConfig(
         name="Kazimierz",
         lat=50.0510, lon=19.9450,
         n_chargers=14, ev_per_day=60, p_max_kw=300, base_load_peak_kw=200,
-        pv_kwp=100, wind_rated_kw=0, bess_kwh=300, bess_p_kw=150, v2g_share=0.2,
+        pv_kwp=100, wind_rated_kw=0, bess_kwh=300, bess_p_kw=150, v2g_share=0.2, load_type="commercial",
     ),
 ]
 

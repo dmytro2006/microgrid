@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import SiteConfig
 from .ev_generator import EV
@@ -24,6 +24,12 @@ class SiteState:
     bess: BESS
     site: SiteConfig
     v2g_soc_floor: float
+    # dane dla strategii predykcyjnych (D): indeks kroku, prognozy na całym horyzoncie, taryfa
+    k: int = 0
+    dt_min: int = 5
+    forecast: dict = field(default_factory=dict)
+    tariff: object = None
+    p_grid_prev: float = 0.0
 
     @property
     def p_net(self) -> float:
@@ -138,3 +144,8 @@ CONTROLLERS: dict[str, type[Controller]] = {
     "B": PeakShavingController,
     "C": SmartController,
 }
+
+
+from .mpc import MPCController  # noqa: E402  (rejestracja strategii D; import po definicjach – brak cyklu)
+
+CONTROLLERS["D"] = MPCController

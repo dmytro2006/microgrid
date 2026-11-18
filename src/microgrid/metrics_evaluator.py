@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .simulation import Results
+from .tariff import DEFAULT_TARIFF, cost_breakdown
 
 
 def kpis(r: Results) -> dict[str, float]:
@@ -21,6 +22,8 @@ def kpis(r: Results) -> dict[str, float]:
     unmet = (done["soc_final"] < done["soc_target"] - 1e-3)
     served = ses[ses["status"].isin(["served", "end_of_sim"])]
 
+    costs = cost_breakdown(ts, r.cfg.dt_min, r.cfg.days, p_max, r.site.bess_kwh, DEFAULT_TARIFF)
+    efc = (ts["p_bess"].abs().sum() * dt_h) / (2 * r.site.bess_kwh) if r.site.bess_kwh else 0.0
     return {
         "SSR [%]": 100 * np.minimum(demand, gen).sum() / demand.sum(),
         "SSR_import [%]": 100 * (1 - ts["p_grid"].clip(lower=0).sum() / demand.sum()),
@@ -28,8 +31,10 @@ def kpis(r: Results) -> dict[str, float]:
         "dP_over_max [kW]": float(max(0.0, (ts["p_grid"].abs() - p_max).max())),
         "P_grid_peak [kW]": float(ts["p_grid"].max()),
         "UDR [%]": 100 * unmet.mean() if len(done) else 0.0,
-        "EFC [-]": (ts["p_bess"].abs().sum() * dt_h) / (2 * r.site.bess_kwh) if r.site.bess_kwh else 0.0,
+        "EFC [-]": efc,
+        "Utrata SoH BESS [%]": 20.0 * efc / DEFAULT_TARIFF.bess_cycle_life,
         "Koszt [PLN]": float((ts["p_grid"] * ts["price"] / 1000.0).sum() * dt_h),
+        **costs,
         "E_EV [kWh]": float(ts["p_ev_ch"].sum() * dt_h),
         "E_V2G [kWh]": float(ts["p_ev_dis"].sum() * dt_h),
         "EV łącznie": float(len(ses)),

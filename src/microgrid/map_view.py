@@ -94,7 +94,24 @@ def map_layers_data(results: list[Results], k: int) -> tuple[list[dict], list[di
     return nodes, flows, labels
 
 
-def build_deck(results: list[Results], k: int) -> pdk.Deck:
+def chargers_data() -> list[dict]:
+    """Rzeczywiste stacje ładowania z OSM (cache) w formacie warstw mapy; [] gdy brak danych."""
+    from .osm import load_chargers
+
+    df = load_chargers()
+    if df is None or df.empty:
+        return []
+    out = []
+    for r in df.itertuples():
+        kw = f"{r.max_kw:g} kW" if r.max_kw == r.max_kw and r.max_kw else "moc nieznana"
+        cap = f" · {int(r.capacity)} pkt" if r.capacity == r.capacity and r.capacity else ""
+        out.append({"position": [r.lon, r.lat], "name": f"⚡ {r.name}",
+                    "info": f"{r.operator or 'operator nieznany'} · {kw}{cap} (OSM)",
+                    "dc": bool(r.max_kw == r.max_kw and r.max_kw and r.max_kw >= 40)})
+    return out
+
+
+def build_deck(results: list[Results], k: int, show_chargers: bool = True) -> pdk.Deck:
     nodes, flows, labels = map_layers_data(results, k)
     lats = [r.site.lat for r in results]
     lons = [r.site.lon for r in results]
@@ -111,6 +128,11 @@ def build_deck(results: list[Results], k: int) -> pdk.Deck:
                   get_color=[30, 30, 30], get_alignment_baseline="'bottom'",
                   character_set="auto", font_weight="bold"),
     ]
+    chargers = chargers_data() if show_chargers else []
+    if chargers:
+        layers.insert(0, pdk.Layer(
+            "ScatterplotLayer", chargers, get_position="position", get_radius=35, radius_min_pixels=2.5,
+            get_fill_color="dc ? [174, 62, 201, 210] : [132, 94, 247, 150]", pickable=True))
     return pdk.Deck(layers=layers, initial_view_state=view, map_style=MAP_STYLE, map_provider="carto",
                     tooltip={"html": "<b>{name}</b><br/>{info}",
                              "style": {"fontSize": "12px"}})

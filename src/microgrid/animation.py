@@ -17,7 +17,7 @@ import json
 import numpy as np
 
 from .config import GRID_SUPPLY_POINT
-from .map_view import NODE_COLORS, OFFSETS
+from .map_view import NODE_COLORS, OFFSETS, chargers_data
 from .simulation import Results
 
 MAX_FRAMES = 2016  # np. 7 dni × 288 kroków 5-min
@@ -104,6 +104,8 @@ def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool =
     payload = {
         "times": _times(results[0], step), "sites": sites,
         "gpz": GRID_SUPPLY_POINT, "offsets": OFFSETS, "colors": NODE_COLORS,
+        "chargers": [{"pos": c["position"], "name": c["name"] + " – " + c["info"], "dc": c["dc"]}
+                     for c in chargers_data()],
     }
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -127,6 +129,7 @@ const C = D.colors;
 const legend = document.getElementById('legend');
 legend.innerHTML = [['PV',C.PV],['Wiatr',C.Wiatr],['BESS',C.BESS],['Stacja EV',C['Stacja EV']],['GPZ',C.GPZ]]
   .map(([n,c]) => `<div><i style="background:rgb(${{c}})"></i>${{n}}</div>`).join('') +
+  (D.chargers.length ? `<div><i style="background:rgb(132,94,247)"></i>ładowarki OSM (${{D.chargers.length}})</div>` : '') +
   '<div class="muted" style="color:#6b7785">kolor PCC: zielony → czerwony = |P_grid|/P_max<br>cząstki: kierunek i moc przepływu</div>';
 
 function loadColor(r) {{
@@ -198,6 +201,8 @@ function render(k, dt) {{
   const F = buildFrame(k, dt);
   deckgl.setProps({{layers: [
     tiles,
+    new deck.ScatterplotLayer({{id: 'osm', data: D.chargers, getPosition: d => d.pos, getRadius: 30,
+      radiusMinPixels: 2.5, getFillColor: d => d.dc ? [174, 62, 201, 220] : [132, 94, 247, 160], pickable: true}}),
     new deck.LineLayer({{id: 'links', data: F.links, getSourcePosition: d => d.a, getTargetPosition: d => d.b,
       getColor: d => d.c, getWidth: d => d.w, widthUnits: 'pixels'}}),
     new deck.ScatterplotLayer({{id: 'dots', data: F.dots, getPosition: d => d.pos, getRadius: d => d.r,

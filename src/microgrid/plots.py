@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 plt.rcParams.update({"font.size": 8, "axes.titlesize": 9, "axes.labelsize": 8,
@@ -15,7 +16,7 @@ from .simulation import Results
 COLORS = {
     "load": "#6c757d", "ev": "#e8590c", "pv": "#f2b705", "wind": "#3bb2d0",
     "bess": "#2f9e44", "grid": "#1c4c78", "limit": "#c92a2a",
-    "A": "#c92a2a", "B": "#f08c00", "C": "#2f9e44",
+    "A": "#c92a2a", "B": "#f08c00", "C": "#2f9e44", "D": "#7048e8",
 }
 
 
@@ -167,4 +168,75 @@ def plot_real_inputs(r: Results) -> plt.Figure:
     ax.legend(loc="upper left", ncol=3, frameon=False)
     _fmt_time(ax)
     fig.tight_layout(h_pad=0.4)
+    return fig
+
+
+COST_PARTS = ["Energia [PLN]", "Dystrybucja [PLN]", "Opł. mocowa [PLN]", "Opł. stała [PLN]",
+              "Kara moc umowna [PLN]", "Zużycie BESS [PLN]"]
+COST_COLORS = ["#1c4c78", "#4dabf7", "#f08c00", "#adb5bd", "#c92a2a", "#2f9e44"]
+
+
+def plot_cost_breakdown(table: pd.DataFrame, site_name: str) -> plt.Figure:
+    """Struktura kosztu całkowitego wg taryfy dla każdej strategii (słupki skumulowane)."""
+    df = table.xs(site_name, level="Lokalizacja")
+    fig, ax = plt.subplots(figsize=(12, 3.2))
+    bottom = pd.Series(0.0, index=df.index)
+    for part, col in zip(COST_PARTS, COST_COLORS):
+        v = df[part].clip(lower=0)
+        ax.barh([CONTROLLERS[s].label for s in df.index], v, left=bottom, color=col, label=part.replace(" [PLN]", ""))
+        bottom += v
+    for i, (s, tot) in enumerate(df["Koszt całk. [PLN]"].items()):
+        ax.text(bottom.iloc[i], i, f"  {tot:,.0f} PLN".replace(",", " "), va="center", fontsize=8, fontweight="bold")
+    ax.invert_yaxis()
+    ax.set_xlabel("PLN w horyzoncie symulacji")
+    ax.set_xlim(0, bottom.max() * 1.18)
+    ax.set_title(f"{site_name} – struktura kosztu (taryfa C2x, orientacyjna)", fontweight="bold")
+    ax.legend(ncol=6, fontsize=7, loc="lower left", bbox_to_anchor=(0, 1.08), frameon=False)
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_monte_carlo(mc: pd.DataFrame, metrics: list[str]) -> plt.Figure:
+    """Rozrzut KPI między powtórzeniami (pudełka + punkty) dla każdej strategii."""
+    fig, axes = plt.subplots(1, len(metrics), figsize=(12, 3.4))
+    axes = np.atleast_1d(axes)
+    strategies = sorted(mc["Scenariusz"].unique())
+    rng = np.random.default_rng(0)
+    for ax, m in zip(axes, metrics):
+        data = [mc.loc[mc["Scenariusz"] == s, m].to_numpy(dtype=float) for s in strategies]
+        bp = ax.boxplot(data, patch_artist=True, widths=0.55, showfliers=False)
+        bp_labels = strategies
+        ax.set_xticks(range(1, len(bp_labels) + 1), bp_labels)
+        for patch, s in zip(bp["boxes"], strategies):
+            patch.set_facecolor(COLORS[s])
+            patch.set_alpha(0.35)
+        for i, (d, s) in enumerate(zip(data, strategies), start=1):
+            ax.scatter(i + rng.uniform(-0.12, 0.12, len(d)), d, s=10, color=COLORS[s], zorder=3)
+        ax.set_title(m, fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
+    fig.suptitle(f"Monte Carlo – {mc['seed'].nunique()} powtórzeń", fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+def plot_sizing_heatmap(df: pd.DataFrame, metric: str = "Koszt łączny [PLN]") -> plt.Figure:
+    piv = df.pivot(index="E_BESS [kWh]", columns="P_PV [kWp]", values=metric).sort_index(ascending=False)
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    im = ax.imshow(piv.to_numpy(), cmap="viridis_r", aspect="auto")
+    ax.set_xticks(range(piv.shape[1]), [f"{c:g}" for c in piv.columns])
+    ax.set_yticks(range(piv.shape[0]), [f"{i:g}" for i in piv.index])
+    ax.set_xlabel("P_PV [kWp]")
+    ax.set_ylabel("E_BESS [kWh]")
+    vals = piv.to_numpy()
+    i_best, j_best = np.unravel_index(np.nanargmin(vals), vals.shape)
+    for i in range(vals.shape[0]):
+        for j in range(vals.shape[1]):
+            ax.text(j, i, f"{vals[i, j]:,.0f}".replace(",", " "), ha="center", va="center", fontsize=7,
+                    color="white" if (vals[i, j] - np.nanmin(vals)) > 0.5 * np.ptp(vals) else "black",
+                    fontweight="bold" if (i, j) == (i_best, j_best) else "normal")
+    ax.add_patch(plt.Rectangle((j_best - 0.5, i_best - 0.5), 1, 1, fill=False, ec="#c92a2a", lw=2.5))
+    fig.colorbar(im, ax=ax, label=metric)
+    ax.set_title(f"Dobór PV × BESS – {metric} (ramka = minimum)", fontweight="bold", fontsize=9)
+    fig.tight_layout()
     return fig
