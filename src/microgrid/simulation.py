@@ -26,23 +26,30 @@ class Results:
     bess_losses_kwh: float
     bess_e_init: float
     bess_e_final: float
+    raw: pd.DataFrame | None = None  # surowe dane rzeczywiste (pogoda, RCE, KSE) na siatce Δt
 
 
 def site_seed(site: SiteConfig, seed: int) -> int:
     return seed * 1_000_003 + zlib.crc32(site.name.encode())
 
 
-def make_inputs(site: SiteConfig, cfg: SimConfig) -> tuple[dict[str, np.ndarray], list[EV]]:
+def make_inputs(site: SiteConfig, cfg: SimConfig) -> tuple[dict[str, np.ndarray], list[EV], pd.DataFrame | None]:
     """Wspólne liczby losowe: te same profile i ta sama flota EV dla każdej strategii."""
     rng = np.random.default_rng(site_seed(site, cfg.seed))
-    profiles = generate_profiles(site, cfg, rng)
+    profiles = generate_profiles(site, cfg, rng)  # zawsze losowane – stały strumień dla generatora EV
+    raw = None
+    if cfg.data_source == "real":
+        from .real_data import real_inputs
+        profiles, raw = real_inputs(site, cfg)
+    elif cfg.data_source != "synthetic":
+        raise ValueError(f"Nieznane źródło danych: {cfg.data_source!r}")
     evs = generate_evs(site, cfg, rng)
-    return profiles, evs
+    return profiles, evs, raw
 
 
 def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Results:
     cfg = cfg or SimConfig()
-    profiles, evs = make_inputs(site, cfg)
+    profiles, evs, raw = make_inputs(site, cfg)
     controller = CONTROLLERS[strategy]()
 
     env = simpy.Environment()
@@ -111,12 +118,12 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
         "t_arr": pd.Timestamp(cfg.start) + pd.Timedelta(minutes=ev.t_arr),
         "t_dep": pd.Timestamp(cfg.start) + pd.Timedelta(minutes=ev.t_dep),
         "wait_min": (ev.t_plug - ev.t_arr) if ev.t_plug is not None else np.nan,
-        "cap_kwh": ev.cap_kwh, "p_max_kw": ev.p_max_kw, "v2g": ev.v2g,
+        "model": ev.model, "cap_kwh": ev.cap_kwh, "p_max_kw": ev.p_max_kw, "v2g": ev.v2g,
         "soc_init": ev.soc_init, "soc_target": ev.soc_target, "soc_final": ev.soc,
         "energy_in_kwh": ev.energy_in_kwh, "energy_out_kwh": ev.energy_out_kwh,
     } for ev in sorted(all_evs, key=lambda e: e.id)])
 
-    return Results(site, strategy, cfg, ts, sessions, bess.losses_kwh, bess.e_init, bess.energy)
+    return Results(site, strategy, cfg, ts, sessions, bess.losses_kwh, bess.e_init, bess.energy, raw)
 
 
 def run_all(sites: list[SiteConfig], cfg: SimConfig, strategies=("A", "B", "C")) -> dict[tuple[str, str], Results]:

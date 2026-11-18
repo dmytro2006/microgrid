@@ -1,8 +1,8 @@
 """Konfiguracja mikrosieci i symulacji.
 
-Wszystkie parametry są na razie syntetyczne (brak danych rzeczywistych).
-Lokalizacje odpowiadają przykładowym punktom w Krakowie – docelowo zostaną
-podmienione na rzeczywiste węzły / stacje ładowania.
+Parametry węzłów są przykładowe (lokalizacje w Krakowie). Profile wejściowe mogą
+pochodzić z generatorów syntetycznych (``data_source="synthetic"``) albo z danych
+rzeczywistych Open-Meteo + PSE (``data_source="real"``, patrz ``real_data.py``).
 """
 
 from __future__ import annotations
@@ -27,6 +27,45 @@ class EVParams:
     park_min_h: float = 0.5
     park_max_h: float = 12.0
     v2g_soc_floor: float = 0.30                         # V2G nie rozładuje poniżej tego SoC
+    # flota "real": parametry ładowarek (moc punktu AC / DC) i udział sesji DC
+    ac_charger_kw: float = 22.0
+    dc_charger_kw: float = 50.0
+    dc_share: float = 0.15
+    park_median_dc_h: float = 0.75                      # sesje DC są krótkie
+
+
+@dataclass(frozen=True)
+class EVModel:
+    """Rzeczywisty model pojazdu (pojemność netto, maks. moc ładowania AC / DC)."""
+
+    name: str
+    battery_kwh: float
+    ac_kw: float
+    dc_kw: float
+    weight: float  # orientacyjny udział w parku EV w Polsce
+
+
+# Popularne modele BEV w Polsce (dane katalogowe producentów, wagi orientacyjne
+# na podstawie struktury rejestracji PZPM/PSPA 2023–2025 – do kalibracji).
+EV_MODELS: tuple[EVModel, ...] = (
+    EVModel("Tesla Model Y LR", 75.0, 11.0, 250.0, 0.14),
+    EVModel("Tesla Model 3 RWD", 57.5, 11.0, 170.0, 0.08),
+    EVModel("Skoda Enyaq 85", 77.0, 11.0, 135.0, 0.08),
+    EVModel("VW ID.3 Pro", 58.0, 11.0, 120.0, 0.06),
+    EVModel("VW ID.4 Pro", 77.0, 11.0, 135.0, 0.06),
+    EVModel("BMW iX1", 64.7, 11.0, 130.0, 0.06),
+    EVModel("Volvo EX30", 64.0, 11.0, 153.0, 0.06),
+    EVModel("Kia EV6 LR", 77.4, 11.0, 233.0, 0.05),
+    EVModel("Hyundai Kona 65", 64.8, 11.0, 102.0, 0.05),
+    EVModel("MG4 Standard", 51.0, 6.6, 117.0, 0.05),
+    EVModel("BYD Atto 3", 60.5, 11.0, 88.0, 0.05),
+    EVModel("Renault Zoe R135", 52.0, 22.0, 50.0, 0.04),
+    EVModel("Fiat 500e", 37.3, 11.0, 85.0, 0.04),
+    EVModel("Nissan Leaf 40", 39.0, 6.6, 50.0, 0.04),
+    EVModel("Dacia Spring", 26.8, 7.0, 30.0, 0.04),
+    EVModel("Renault Megane E-Tech", 60.0, 22.0, 130.0, 0.04),
+    EVModel("Porsche Taycan", 83.7, 11.0, 270.0, 0.02),
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +92,8 @@ class SiteConfig:
     wind_v_rated: float = 11.0
     wind_v_cut_out: float = 25.0
     wind_cp: float = 0.40
-    wind_mean_speed: float = 5.5
+    wind_mean_speed: float = 5.5   # tylko tryb syntetyczny
+    wind_hub_m: float = 30.0       # wysokość piasty (tryb danych rzeczywistych)
     # BESS
     bess_kwh: float = 200.0
     bess_p_kw: float = 100.0
@@ -76,7 +116,9 @@ class SimConfig:
     days: int = 2
     dt_min: int = 5
     seed: int = 42
-    start: str = "2026-06-15 00:00"  # data startowa (tylko do opisu osi czasu)
+    start: str = "2026-06-15 00:00"  # data startowa (czas lokalny; w trybie "real" wybiera dane)
+    data_source: str = "synthetic"   # "synthetic" | "real" (Open-Meteo + PSE)
+    ev_fleet: str = "synthetic"      # "synthetic" | "real" (modele EV_MODELS + ładowarki AC/DC)
     ev: EVParams = field(default_factory=EVParams)
 
     @property

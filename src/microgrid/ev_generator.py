@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import simpy
 
-from .config import SimConfig, SiteConfig
+from .config import EV_MODELS, SimConfig, SiteConfig
 
 TICK_EPS = 1e-6
 
@@ -31,6 +31,7 @@ class EV:
     soc_target: float
     p_max_kw: float
     v2g: bool
+    model: str = ""
     soc: float = field(init=False)
     t_plug: float | None = None
     energy_in_kwh: float = 0.0
@@ -87,6 +88,8 @@ def generate_evs(site: SiteConfig, cfg: SimConfig, rng: np.random.Generator) -> 
     lam_max = lam_scale * shape.max()
 
     p = cfg.ev
+    weights = np.array([m.weight for m in EV_MODELS])
+    weights = weights / weights.sum()
     evs: list[EV] = []
     t_h = 0.0
     horizon_h = cfg.horizon_min / 60.0
@@ -99,6 +102,16 @@ def generate_evs(site: SiteConfig, cfg: SimConfig, rng: np.random.Generator) -> 
             continue
         hod = t_h % 24.0
         median = p.park_median_evening_h if hod >= 17.0 else p.park_median_h
+        if cfg.ev_fleet == "real":
+            m = EV_MODELS[rng.choice(len(EV_MODELS), p=weights)]
+            dc = rng.random() < p.dc_share
+            cap, model = m.battery_kwh, m.name
+            p_max = min(m.dc_kw, p.dc_charger_kw) if dc else min(m.ac_kw, p.ac_charger_kw)
+            if dc:
+                median = p.park_median_dc_h
+        else:
+            cap, model, dc = float(rng.choice(p.battery_kwh)), "", False
+            p_max = float(rng.choice(p.p_ch_max_kw, p=p.p_ch_weights))
         park_h = float(np.clip(rng.lognormal(math.log(median), p.park_sigma), p.park_min_h, p.park_max_h))
         t_arr = math.ceil(t_h * 60.0 / dt) * dt
         if t_arr >= cfg.horizon_min:
@@ -109,11 +122,12 @@ def generate_evs(site: SiteConfig, cfg: SimConfig, rng: np.random.Generator) -> 
                 id=len(evs),
                 t_arr=float(t_arr),
                 t_dep=float(t_dep),
-                cap_kwh=float(rng.choice(p.battery_kwh)),
+                cap_kwh=float(cap),
                 soc_init=float(rng.uniform(*p.soc_init)),
                 soc_target=float(rng.uniform(*p.soc_target)),
-                p_max_kw=float(rng.choice(p.p_ch_max_kw, p=p.p_ch_weights)),
-                v2g=bool(rng.random() < site.v2g_share),
+                p_max_kw=float(p_max),
+                v2g=bool(rng.random() < site.v2g_share) and not dc,  # V2G tylko na AC (ISO 15118-20)
+                model=model,
             )
         )
     return evs

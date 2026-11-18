@@ -116,3 +116,55 @@ def plot_kpi_bars(table: pd.DataFrame, metrics=("T_over [min/doba]", "dP_over_ma
     fig.suptitle("KPI – porównanie scenariuszy A/B/C", fontweight="bold")
     fig.tight_layout()
     return fig
+
+
+def plot_real_inputs(r: Results) -> plt.Figure:
+    """Dane rzeczywiste: nasłonecznienie i PV, wiatr i turbina, ceny RCE, kontekst KSE."""
+    raw, ts = r.raw, r.ts
+    t = ts["time"]
+    fig, axes = plt.subplots(4, 1, figsize=(12, 7.2), sharex=True)
+    fig.suptitle(f"{r.site.name} – dane rzeczywiste (Open-Meteo, PSE)", fontsize=10, fontweight="bold")
+
+    ax = axes[0]
+    ax.fill_between(t, 0, raw["gti"], color=COLORS["pv"], alpha=0.3, label="GTI (35°, S) [W/m²]")
+    ax.set_ylabel("GTI [W/m²]")
+    ax2 = ax.twinx()
+    ax2.plot(t, ts["pv"], color="#e67700", lw=1.3, label="P_PV [kW]")
+    ax2.plot(t, raw["temp"], color="#c92a2a", lw=0.9, ls=":", label="T_pow [°C]")
+    ax2.set_ylabel("kW / °C")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", ncol=3, frameon=False)
+    _fmt_time(ax)
+
+    ax = axes[1]
+    ax.plot(t, raw["v10"], color="#99e9f2", lw=0.9, label="v 10 m")
+    ax.plot(t, raw["v100"], color="#0b7285", lw=0.9, label="v 100 m")
+    ax.plot(t, raw["v_hub"], color=COLORS["wind"], lw=1.4, label=f"v piasta {r.site.wind_hub_m:.0f} m")
+    ax.axhline(r.site.wind_v_cut_in, color="k", ls=":", lw=0.8, label="cut-in")
+    ax.set_ylabel("Wiatr [m/s]")
+    ax2 = ax.twinx()
+    ax2.plot(t, ts["wind"], color="#1864ab", lw=1.0, alpha=0.6, label="P_wind [kW]")
+    ax2.set_ylabel("kW")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", ncol=5, frameon=False)
+    _fmt_time(ax)
+
+    ax = axes[2]
+    ax.plot(t, raw["rce"], color="#7048e8", lw=1.2)
+    ax.axhline(0, color="k", lw=0.6)
+    ax.fill_between(t, raw["rce"], 0, where=raw["rce"] < 0, color="#2f9e44", alpha=0.4, label="cena ujemna")
+    ax.set_ylabel("RCE\n[PLN/MWh]")
+    _fmt_time(ax)
+
+    ax = axes[3]
+    gw = 1000.0
+    ax.plot(t, raw["kse_demand"] / gw, color="#495057", lw=1.3, label="zapotrzebowanie KSE")
+    ax.stackplot(t, raw["kse_pv"] / gw, raw["kse_wind"] / gw, colors=[COLORS["pv"], COLORS["wind"]],
+                 alpha=0.5, labels=["PV (PL)", "wiatr (PL)"])
+    ax.set_ylabel("KSE [GW]")
+    ax.legend(loc="upper left", ncol=3, frameon=False)
+    _fmt_time(ax)
+    fig.tight_layout(h_pad=0.4)
+    return fig
