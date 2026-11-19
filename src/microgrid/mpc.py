@@ -21,7 +21,8 @@ Prognozy: ``perfect`` (znane wartości – górne ograniczenie jakości) lub ``p
 Przyszłe przyjazdy EV nie są znane – plan obejmuje wyłącznie pojazdy podłączone.
 Awaria GPZ zapowiedziana (``SimConfig.outage_announced``): w krokach awarii P_imp = P_exp = 0
 (proporcjonalnie do części kroku), a bilans domykają zmienne odciążenia (koszt VOLL) i ograniczenia OZE –
-plan wcześniej ładuje BESS. Awaria nagła nie jest znana planowi; obsługuje ją dyspozycja wyspowa symulatora.
+plan wcześniej ładuje BESS. Z farmą wiatrową przy GPZ (``wind_farm="gpz"``) w czasie awarii dozwolony jest
+pobór do wysokości prognozowanego udziału węzła w produkcji farmy. Awaria nagła nie jest znana planowi; obsługuje ją dyspozycja wyspowa symulatora.
 Na koniec każdego kroku działa korekta czasu rzeczywistego (BESS → dławienie EV), gdy
 chwilowa moc odbiega od uśrednionej prognozy.
 """
@@ -75,7 +76,7 @@ class MPCController(Controller):
     def _forecast(self, s: SiteState, bounds: np.ndarray) -> dict[str, np.ndarray]:
         idx = (s.k + bounds / s.dt_min).astype(int)
         out = {}
-        for key in ("net", "load", "p_imp", "p_exp", "grid_ok"):
+        for key in ("net", "load", "p_imp", "p_exp", "grid_ok", "farm"):
             if key not in s.forecast:
                 continue
             cs = np.concatenate([[0.0], np.cumsum(np.asarray(s.forecast[key], dtype=float))])
@@ -130,9 +131,12 @@ class MPCController(Controller):
 
         # awaria zapowiedziana: o_j – część kroku j bez zasilania z GPZ (wymiana z siecią tylko poza awarią)
         out = 1.0 - fc["grid_ok"] if "grid_ok" in fc else np.zeros(n)
-        cap = [None if out[j] < 1e-9 else (1.0 - out[j]) * p_lim for j in range(n)]
-        imp = [var(Lh[j] * fc["p_imp"][j] / 1000.0, 0, cap[j]) for j in range(n)]
-        exp = [var(-Lh[j] * fc["p_exp"][j] / 1000.0, 0, cap[j]) for j in range(n)]
+        # wariant "gpz": w czasie awarii pobór z GPZ do wysokości prognozowanego udziału farmy
+        farm = fc["farm"] if "farm" in fc else np.zeros(n)
+        cap_exp = [None if out[j] < 1e-9 else (1.0 - out[j]) * p_lim for j in range(n)]
+        cap_imp = [None if out[j] < 1e-9 else (1.0 - out[j]) * p_lim + out[j] * max(0.0, farm[j]) for j in range(n)]
+        imp = [var(Lh[j] * fc["p_imp"][j] / 1000.0, 0, cap_imp[j]) for j in range(n)]
+        exp = [var(-Lh[j] * fc["p_exp"][j] / 1000.0, 0, cap_exp[j]) for j in range(n)]
         isl = {j: (var(VOLL * Lh[j], 0, out[j] * max(0.0, fc["load"][j])),                    # odciążenie
                    var(CURT_COST * Lh[j], 0, out[j] * max(0.0, fc["load"][j] - fc["net"][j])))  # ograniczenie OZE
                for j in range(n) if out[j] > 1e-9}

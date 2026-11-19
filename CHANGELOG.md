@@ -2,6 +2,35 @@
 
 Wszystkie zmiany na gałęzi `feature/real-data-animations` względem `master` (`092cb05 Initial commit`).
 
+## [0.6.0] – 2026-11-19 · wspólna farma wiatrowa poza miastem
+
+### Dodane
+- **Farma wiatrowa poza miastem** (`windfarm.py`, `SimConfig.wind_farm`, `wind_farm_mw`, `wind_farm_hub_m`).
+  - Turbiny wielomegawatowe (start 3 m/s, moc znamionowa od 12 m/s), piasta domyślnie 120 m. Wiatr z Open-Meteo
+    dla otwartego terenu na płn.-zach. od Krakowa; w trybie syntetycznym godzinowy proces AR(1), średnio 6 m/s.
+  - Produkcja dzielona między symulowane węzły proporcjonalnie do mocy umownej.
+  - Wariant **`ppa`**: farma przyłączona gdzie indziej w sieci OSD. Fizyczne przepływy w PCC bez zmian,
+    zmienia się tylko rachunek: udział po cenie PPA (`Tariff.ppa_price_pln_mwh` = 380 PLN/MWh, pay-as-produced).
+    W tym samym kroku zastępuje zakup po cenie spot, a nadwyżka jest odsprzedawana po cenie spot.
+    Nie pomaga przy awarii GPZ.
+  - Wariant **`gpz`**: farma przy tym samym GPZ. Rozliczenie jak PPA, a w czasie awarii GPZ pracuje wyspowo
+    z farmą i każdy węzeł pobiera do wysokości swojego udziału. MPC przy awarii zapowiedzianej zna
+    prognozowany udział.
+- KPI: `Farma: energia [kWh]`, `Farma: pokrycie poboru [%]`; składnik kosztu `Farma PPA [PLN]` (netto).
+- Panel: sekcja „Farma wiatrowa poza miastem” (wariant, moc, wysokość piasty), farma na obu mapach,
+  udział farmy na wykresie przebiegów.
+
+### Wyniki (9 węzłów, 2 doby, dane rzeczywiste, farma 3 MW / 120 m, awaria 17:00–22:00)
+
+| | CF farmy | koszt D: bez / PPA / GPZ [PLN] | ENS D: bez / PPA / GPZ [kWh] | pokrycie poboru |
+|---|---:|---:|---:|---:|
+| styczeń (od 12.01) | 14% | 116 473 / 107 519 / 108 025 | 6 889 / 6 889 / 6 688 | 20% |
+| czerwiec (od 15.06) | 29% | 43 089 / 44 055 / 47 216 | 4 184 / 4 184 / 1 394 | 61–64% |
+
+- Zimą farma obniża koszt o ok. 8%. Latem PPA jest nieco droższe od taniej energii w południe.
+- Farma przez sieć OSD nie zmienia ENS ani przeciążeń transformatorów. Przyłączona do GPZ latem obniża ENS 3×.
+  W wariancie GPZ koszt jest wyższy, bo w czasie awarii obsłużono więcej odbiorców (opłaty dystrybucyjne).
+
 ## [0.5.0] – 2026-11-19 · awaria GPZ (blackout), mapy bez klucza API
 
 ### Dodane

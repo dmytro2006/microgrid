@@ -81,6 +81,19 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
         "p_imp": import_price(profiles["price"], times), "p_exp": profiles["price"],
     }
     grid_ok = cfg.grid_available()
+    # wspólna farma wiatrowa: udział węzła w produkcji [kW] (rozliczenie PPA; w wariancie "gpz" też wyspa GPZ)
+    if cfg.wind_farm in ("ppa", "gpz"):
+        from .windfarm import farm_profile, site_share
+        p_farm = site_share(site) * farm_profile(cfg)
+    elif cfg.wind_farm == "none":
+        p_farm = np.zeros(cfg.n_steps)
+    else:
+        raise ValueError(f"Nieznany wariant farmy wiatrowej: {cfg.wind_farm!r}")
+    island_farm = p_farm if cfg.wind_farm == "gpz" else np.zeros(cfg.n_steps)
+    fc_farm = island_farm.copy()
+    if cfg.forecast == "persistence":
+        fc_farm[steps_per_day:] = island_farm[:-steps_per_day]
+    forecast["farm"] = fc_farm
     # awaria zapowiedziana → MPC zna okno z wyprzedzeniem; nagła → plan zakłada sprawną sieć
     forecast["grid_ok"] = grid_ok if cfg.outage_announced else np.ones_like(grid_ok)
     if cfg.mpc_ev_forecast:
@@ -119,10 +132,11 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
             p_bess_cmd = min(p_bess_cmd, b_ch) if p_bess_cmd >= 0 else -min(-p_bess_cmd, b_dis)
 
             load, pv, wind = state.load, state.pv, state.wind
+            farm_k = float(island_farm[k])  # moc dostępna z GPZ w czasie awarii (wariant "gpz")
             shed = curt = 0.0
-            if not grid_ok[k]:  # awaria GPZ – praca wyspowa, P_grid = 0
+            if not grid_ok[k]:  # awaria GPZ – praca wyspowa (P_grid = 0 albo pobór z farmy przy GPZ)
                 p_ev, p_bess_cmd, shed, curt = island_dispatch(
-                    load, pv + wind, p_ev, ch_max, dis_max, p_bess_cmd, b_ch, b_dis)
+                    load, pv + wind + farm_k, p_ev, ch_max, dis_max, p_bess_cmd, b_ch, b_dis)
 
             p_ch = p_dis = 0.0
             for ev in state.active:
@@ -137,21 +151,24 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
             p_ev_sum = p_ch - p_dis
             if not grid_ok[k]:
                 # domknięcie bilansu (resztki numeryczne → odciążenie / ograniczenie OZE)
-                resid = pcc_balance(load - shed, p_ev_sum, p_bess, pv + wind - curt, 0.0)
+                resid = pcc_balance(load - shed, p_ev_sum, p_bess, pv + wind + farm_k - curt, 0.0)
                 if resid > 0:
                     shed = min(load, shed + resid)
                 else:
-                    curt = min(pv + wind, curt - resid)
-                if pv + wind > 0:  # ograniczenie OZE proporcjonalnie do produkcji
+                    curt = min(pv + wind + farm_k, curt - resid)
+                curt = max(0.0, curt - farm_k)  # najpierw niewykorzystany udział farmy, potem lokalne OZE
+                if pv + wind > 0:  # ograniczenie lokalnych OZE proporcjonalnie do produkcji
                     f = 1.0 - curt / (pv + wind)
                     pv, wind = pv * f, wind * f
                 load -= shed
             p_grid = pcc_balance(load, p_ev_sum, p_bess, pv, wind)
             if not grid_ok[k]:
                 p_grid = 0.0 if abs(p_grid) < 1e-6 else p_grid
+                assert -1e-6 <= p_grid <= farm_k + 1e-6, (k, p_grid, farm_k)
             rows.append({
                 "t_min": t, "load": load, "pv": pv, "wind": wind,
                 "load_dem": state.load, "p_shed": shed, "p_curt": curt, "grid_ok": bool(grid_ok[k]),
+                "p_farm": float(p_farm[k]),
                 "price": state.price, "p_ev": p_ev_sum, "p_ev_ch": p_ch, "p_ev_dis": p_dis,
                 "p_bess": p_bess, "soc_bess": bess.soc, "p_grid": p_grid,
                 "n_active": len(state.active), "n_queue": station.queue_len,
@@ -210,6 +227,9 @@ def parallel_map(fn, tasks: list, n_jobs: int | None = None) -> list:
 def run_all(sites: list[SiteConfig], cfg: SimConfig, strategies=("A", "B", "C", "D"),
             n_jobs: int | None = None) -> dict[tuple[str, str], Results]:
     """Uruchamia wszystkie pary (lokalizacja, strategia); ``n_jobs`` > 1 → procesy równoległe."""
+    if cfg.wind_farm != "none":  # farma dzielona tylko między symulowane węzły
+        from .windfarm import assign_shares
+        sites = assign_shares(sites)
     tasks = [(s, st, cfg) for s in sites for st in strategies]
     out = parallel_map(_run_task, tasks, n_jobs)
     return {(s.name, st): r for (s, st, _), r in zip(tasks, out)}

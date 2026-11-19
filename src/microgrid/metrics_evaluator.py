@@ -54,6 +54,19 @@ def kpis(r: Results) -> dict[str, float]:
         "EV odrzucone": float(ses["status"].isin(["balked", "reneged"]).sum()),
         "Śr. oczekiwanie [min]": float(served["wait_min"].mean()) if len(served) else 0.0,
         **outage_kpis(r),
+        **farm_kpis(r),
+    }
+
+
+def farm_kpis(r: Results) -> dict[str, float]:
+    """Udział we wspólnej farmie wiatrowej: energia i część poboru z sieci pokryta produkcją farmy."""
+    ts, dt_h = r.ts, r.cfg.dt_h
+    farm = ts["p_farm"] if "p_farm" in ts else pd.Series(0.0, index=ts.index)
+    imp = ts["p_grid"].clip(lower=0)
+    matched = np.minimum(imp, farm)
+    return {
+        "Farma: energia [kWh]": float(farm.sum() * dt_h),
+        "Farma: pokrycie poboru [%]": 100 * float(matched.sum() / imp.sum()) if imp.sum() > 0 else 0.0,
     }
 
 

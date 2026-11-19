@@ -88,6 +88,8 @@ class SiteConfig:
     # odbiory bazowe
     base_load_peak_kw: float = 160.0
     load_type: str = "kse"  # tryb "real": "kse" | "residential" | "office" | "commercial"
+    # udział we wspólnej farmie wiatrowej poza miastem (0 → proporcjonalnie do mocy umownej wśród ALL_SITES)
+    farm_share: float = 0.0
     # OZE
     pv_kwp: float = 120.0
     inverter_eff: float = 0.96
@@ -140,6 +142,11 @@ class SimConfig:
     outage_start_h: float | None = None
     outage_dur_h: float = 4.0
     outage_announced: bool = False
+    # wspólna farma wiatrowa poza miastem: "none" | "ppa" (przez sieć OSD, rozliczenie umową PPA)
+    # | "gpz" (przyłączona do GPZ – rozliczenie jak PPA, a w czasie awarii GPZ pracuje wyspowo z farmą)
+    wind_farm: str = "none"
+    wind_farm_mw: float = 3.0
+    wind_farm_hub_m: float = 120.0
 
     @property
     def horizon_min(self) -> int:
@@ -224,3 +231,5 @@ ALL_SITES: list[SiteConfig] = KRAKOW_SITES + KRAKOW_SITES_EXTRA
 
 # Umowny punkt zasilania z sieci nadrzędnej (GPZ) – do wizualizacji na mapie.
 GRID_SUPPLY_POINT = {"name": "GPZ – sieć nadrzędna (umowny)", "lat": 50.0600, "lon": 19.9800}
+# wspólna farma wiatrowa poza miastem (lokalizacja umowna, otwarty teren na płn.-zach. od Krakowa)
+WIND_FARM_SITE = {"name": "Farma wiatrowa (poza miastem)", "lat": 50.1150, "lon": 19.8750}

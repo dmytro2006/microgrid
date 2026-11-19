@@ -55,6 +55,8 @@ def plot_timeseries(r: Results) -> plt.Figure:
     ax.plot(t, ts["p_ev"], color=COLORS["ev"], lw=1.2, label="Σ EV (netto)")
     ax.plot(t, ts["p_bess"], color=COLORS["bess"], lw=1.2, label="BESS (+ład./−rozł.)")
     ax.plot(t, ts["p_grid"], color=COLORS["grid"], lw=2.0, label="P_grid (PCC)")
+    if "p_farm" in ts and ts["p_farm"].max() > 0:
+        ax.plot(t, ts["p_farm"], color="#0ca678", lw=1.1, ls="--", label="Farma (udział, PPA)")
     spans = _outage_spans(ts, r.cfg.dt_min)
     if spans:
         ax.fill_between(t, ts["load"], ts["load_dem"], where=ts["p_shed"] > 1e-6, color=COLORS["limit"],
@@ -199,9 +201,9 @@ def plot_real_inputs(r: Results) -> plt.Figure:
     return fig
 
 
-COST_PARTS = ["Energia [PLN]", "Dystrybucja [PLN]", "Opł. mocowa [PLN]", "Opł. stała [PLN]",
+COST_PARTS = ["Energia [PLN]", "Farma PPA [PLN]", "Dystrybucja [PLN]", "Opł. mocowa [PLN]", "Opł. stała [PLN]",
               "Kara moc umowna [PLN]", "Zużycie BESS [PLN]"]
-COST_COLORS = ["#1c4c78", "#4dabf7", "#f08c00", "#adb5bd", "#c92a2a", "#2f9e44"]
+COST_COLORS = ["#1c4c78", "#0ca678", "#4dabf7", "#f08c00", "#adb5bd", "#c92a2a", "#2f9e44"]
 
 
 def plot_cost_breakdown(table: pd.DataFrame, site_name: str) -> plt.Figure:

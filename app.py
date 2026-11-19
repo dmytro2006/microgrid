@@ -83,6 +83,18 @@ def main() -> None:
                             help="Np. planowane wyłączenie OSD. MPC (D) zawczasu ładuje BESS; pozostałe strategie "
                                  "nie korzystają z prognoz.")
 
+        st.header("Farma wiatrowa poza miastem")
+        farm = st.radio("Wariant", ["none", "ppa", "gpz"], key="farm",
+                        format_func=lambda x: {"none": "brak", "ppa": "przez sieć OSD (umowa PPA)",
+                                               "gpz": "przyłączona do GPZ (+ wyspa przy awarii)"}[x],
+                        help="Wspólna farma dzielona między węzły proporcjonalnie do mocy umownej. "
+                             "PPA: energia płynie przez sieć publiczną – obniża rachunek, ale nie odciąża "
+                             "transformatorów i nie pomaga przy awarii. GPZ: rozliczenie jak PPA, a w czasie "
+                             "awarii GPZ pracuje wyspowo z farmą i zasila węzły do wysokości ich udziałów.")
+        farm_mw = st.slider("Moc farmy [MW]", 0.5, 10.0, 3.0, step=0.5, disabled=farm == "none")
+        farm_hub = st.select_slider("Wysokość piasty [m]", options=[80, 100, 120, 140], value=120,
+                                    disabled=farm == "none")
+
         st.header("Lokalizacja")
         all_names = [s.name for s in ALL_SITES]
         chosen = st.multiselect("Węzły w symulacji", all_names, default=all_names,
@@ -116,6 +128,7 @@ def main() -> None:
                     ev_fleet="real" if fleet else "synthetic", forecast=forecast, mpc_ev_forecast=ev_fc,
                     outage_start_h=float(out_start) if outage else None, outage_dur_h=float(out_dur),
                     outage_announced=bool(out_ann),
+                    wind_farm=farm, wind_farm_mw=float(farm_mw), wind_farm_hub_m=float(farm_hub),
                     start=f"{start:%Y-%m-%d} 00:00" if source == "real" else SimConfig.start)
     caption.caption(
         "Hybrydowa symulacja DES (SimPy) + krok bilansowy Δt. Dane wejściowe: " +
@@ -199,6 +212,13 @@ def main() -> None:
                            else None, delta_color="inverse",
                            help="ENS – energia niedostarczona odbiorcom (odciążenie) w czasie awarii."
                            if m.startswith("ENS") else None)
+        if cfg.wind_farm != "none":
+            cols = st.columns(3)
+            cols[0].metric("Farma: energia [kWh]", f"{k_now['Farma: energia [kWh]']:.0f}",
+                           help="Udział węzła w produkcji farmy (proporcjonalny do mocy umownej).")
+            cols[1].metric("Farma: pokrycie poboru [%]", f"{k_now['Farma: pokrycie poboru [%]']:.1f}",
+                           help="Część energii pobranej z sieci, zbilansowana w tym samym kroku produkcją farmy.")
+            cols[2].metric("Farma PPA [PLN]", f"{k_now['Farma PPA [PLN]']:.0f}")
         fig = plot_timeseries(r)
         show(fig)
         res = energy_balance_residuals(r)
@@ -346,7 +366,7 @@ def main() -> None:
         st.divider()
         st.subheader("Parametry taryfy (orientacyjne)")
         st.dataframe(pd.Series(DEFAULT_TARIFF.__dict__, name="wartość").to_frame()
-                     .assign(jednostka=["PLN/MWh"] * 5 + ["PLN/kW/mies.", "×", "PLN/kWh", "cykli", "-"]),
+                     .assign(jednostka=["PLN/MWh"] * 5 + ["PLN/kW/mies.", "×", "PLN/kWh", "cykli", "-", "PLN/MWh"]),
                      width="stretch")
 
 

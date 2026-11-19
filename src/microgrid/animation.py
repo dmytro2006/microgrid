@@ -16,7 +16,7 @@ import json
 
 import numpy as np
 
-from .config import GRID_SUPPLY_POINT
+from .config import GRID_SUPPLY_POINT, WIND_FARM_SITE
 from .map_view import NODE_COLORS, OFFSETS, chargers_data, fit_zoom
 from .simulation import Results
 from .tariff import import_price
@@ -105,10 +105,26 @@ def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool =
             "name": s.name, "lat": s.lat, "lon": s.lon, "p_max": s.p_max_kw, "has_wind": s.wind_rated_kw > 0,
             "series": _series(r, step),
         })
+    lats = [r.site.lat for r in results]
+    lons = [r.site.lon for r in results]
+    farm = None
+    variant = results[0].cfg.wind_farm
+    if variant != "none":
+        prod = sum(r.ts["p_farm"].to_numpy() for r in results)
+        used = sum(r.ts["p_grid"].clip(lower=0).to_numpy() for r in results)
+        ok = results[0].ts["grid_ok"].to_numpy()
+        # "gpz": fizyczny przepływ farma → GPZ (w czasie awarii – tylko to, co węzły pobrały); "ppa": rozliczenie
+        p = np.where(ok, prod, used) if variant == "gpz" else prod
+        farm = {"lat": WIND_FARM_SITE["lat"], "lon": WIND_FARM_SITE["lon"], "variant": variant,
+                "rated": 1000.0 * results[0].cfg.wind_farm_mw, "p": np.round(p[::step], 1).tolist(),
+                "prod": np.round(prod[::step], 1).tolist()}
+        lats.append(WIND_FARM_SITE["lat"])
+        lons.append(WIND_FARM_SITE["lon"])
     payload = {
-        "times": _times(results[0], step), "sites": sites,
+        "times": _times(results[0], step), "sites": sites, "farm": farm,
+        "center": [(max(lats) + min(lats)) / 2, (max(lons) + min(lons)) / 2],
         "gpz": GRID_SUPPLY_POINT, "offsets": OFFSETS, "colors": NODE_COLORS,
-        "zoom": fit_zoom([r.site.lat for r in results], [r.site.lon for r in results]),
+        "zoom": fit_zoom(lats, lons),
         "chargers": [{"pos": c["position"], "name": c["name"] + " – " + c["info"], "dc": c["dc"]}
                      for c in chargers_data()],
     }
@@ -138,6 +154,7 @@ const C = D.colors;
 const legend = document.getElementById('legend');
 legend.innerHTML = [['PV',C.PV],['Wiatr',C.Wiatr],['BESS',C.BESS],['Stacja EV',C['Stacja EV']],['GPZ',C.GPZ]]
   .map(([n,c]) => `<div><i style="background:rgb(${{c}})"></i>${{n}}</div>`).join('') +
+  (D.farm ? `<div><i style="background:rgb(${{C.Farma}})"></i>farma wiatrowa (${{D.farm.variant === 'gpz' ? 'przy GPZ' : 'PPA'}})</div>` : '') +
   (D.chargers.length ? `<div><i style="background:rgb(132,94,247)"></i>ładowarki OSM (${{D.chargers.length}})</div>` : '') +
   '<div class="muted" style="color:#6b7785">kolor PCC: zielony → czerwony = |P_grid|/P_max<br>cząstki: kierunek i moc przepływu</div>';
 
@@ -185,14 +202,32 @@ function buildFrame(k, dt) {{
       }}
     }}
   }});
+  if (D.farm) {{   // farma wiatrowa poza miastem
+    const F = D.farm, fp = [F.lon, F.lat], p = F.p[k], gpzLink = F.variant === 'gpz';
+    nodes.push({{pos: fp, r: 260, c: C.Farma.concat(235),
+                name: 'Farma wiatrowa: ' + F.prod[k].toFixed(0) + ' / ' + F.rated.toFixed(0) + ' kW' +
+                      (gpzLink ? ' (przyłączona do GPZ)' : ' (PPA – energia przez sieć OSD)')}});
+    labels.push({{pos: [F.lon, F.lat + 0.006], text: 'Farma wiatrowa'}});
+    links.push({{a: fp, b: gpz, w: gpzLink ? 1 + 7 * Math.min(p, F.rated) / F.rated : 1.5,
+                c: gpzLink ? (p < 0.5 ? [150, 150, 150, 60] : [12, 166, 120, 120]) : [12, 166, 120, 70]}});
+    if (gpzLink && p >= 0.5) {{
+      const v = 0.15 + 1.2 * p / F.rated;
+      phase.farm = ((phase.farm || 0) + dt * v) % 1;
+      const n = Math.max(2, Math.round(3 + 12 * p / F.rated));
+      for (let i = 0; i < n; i++) {{
+        const t = (phase.farm + i / n) % 1;
+        dots.push({{pos: [fp[0] + (gpz[0] - fp[0]) * t, fp[1] + (gpz[1] - fp[1]) * t],
+                   c: [12, 166, 120, 240], r: 30 + 60 * p / F.rated}});
+      }}
+    }}
+  }}
   return {{nodes, links, dots, labels}};
 }}
 
 const deckgl = new deck.Deck({{
   parent: document.getElementById('map'),
   initialViewState: {{
-    latitude: (Math.max(...D.sites.map(s => s.lat)) + Math.min(...D.sites.map(s => s.lat))) / 2,
-    longitude: (Math.max(...D.sites.map(s => s.lon)) + Math.min(...D.sites.map(s => s.lon))) / 2,
+    latitude: D.center[0], longitude: D.center[1],
     zoom: D.zoom, pitch: 35, bearing: 0
   }},
   controller: true,

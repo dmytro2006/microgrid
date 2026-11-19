@@ -8,6 +8,8 @@ Model kosztu w horyzoncie symulacji:
   - składnik stały:   moc umowna × stawka [PLN/kW/mies.] × (dni / 30),
   - przekroczenie mocy umownej (§ rozporządzenia taryfowego): 10 × składnik stały × suma
     10 największych nadwyżek 15-minutowej mocy średniej ponad moc umowną (naliczana za miesiąc),
+  - farma wiatrowa (opcjonalnie): udział w produkcji × cena PPA; zbilansowana część poboru nie jest
+                      kupowana po cenie spot, nadwyżka udziału sprzedawana po cenie spot,
   - degradacja BESS:  przepływ energii × koszt cyklu (CAPEX / (2 · liczba cykli · DoD)).
 
 UWAGA: stawki domyślne są orientacyjne (rząd wielkości taryf 2025/2026) – do podmiany na
@@ -34,6 +36,7 @@ class Tariff:
     bess_capex_pln_kwh: float = 1500.0         # koszt magazynu LFP (system)
     bess_cycle_life: float = 6000.0            # liczba cykli do 80% SoH
     bess_dod: float = 0.85
+    ppa_price_pln_mwh: float = 380.0           # cena energii z farmy wiatrowej w umowie PPA (pay-as-produced)
 
     @property
     def import_adders_pln_mwh(self) -> float:
@@ -66,8 +69,14 @@ def cost_breakdown(ts: pd.DataFrame, dt_min: int, days: float, p_contract_kw: fl
     exp = (-ts["p_grid"]).clip(lower=0)
     mwh = lambda p: p * dt_h / 1000.0  # noqa: E731
 
-    energy = float((mwh(imp) * (ts["price"] + tariff.seller_margin_pln_mwh)).sum()
+    # farma wiatrowa (PPA pay-as-produced): udział w produkcji kupowany po cenie PPA; w części pokrywającej
+    # pobór w tym samym kroku zastępuje zakup po cenie spot, nadwyżka udziału sprzedawana po cenie spot
+    farm = ts["p_farm"] if "p_farm" in ts else pd.Series(0.0, index=ts.index)
+    matched = np.minimum(imp, farm)
+    energy = float((mwh(imp - matched) * (ts["price"] + tariff.seller_margin_pln_mwh)).sum()
                    - (mwh(exp) * ts["price"]).sum())
+    # koszt PPA netto: zakup udziału po cenie PPA − odsprzedaż niewykorzystanej nadwyżki po cenie spot
+    ppa = float(mwh(farm).sum() * tariff.ppa_price_pln_mwh - (mwh(farm - matched) * ts["price"]).sum())
     dist = float(mwh(imp).sum() * (tariff.dist_variable_pln_mwh + tariff.quality_pln_mwh + tariff.res_fees_pln_mwh))
     capacity = float((mwh(imp) * capacity_fee_mask(ts["time"])).sum() * tariff.capacity_fee_pln_mwh)
     fixed = p_contract_kw * tariff.fixed_pln_kw_month * days / 30.0
@@ -78,9 +87,9 @@ def cost_breakdown(ts: pd.DataFrame, dt_min: int, days: float, p_contract_kw: fl
     penalty = tariff.overrun_multiplier * tariff.fixed_pln_kw_month * float(over.iloc[:10].sum())
 
     wear = float(ts["p_bess"].abs().sum() * dt_h * tariff.bess_wear_pln_kwh) if bess_kwh > 0 else 0.0
-    total = energy + dist + capacity + fixed + penalty + wear
+    total = energy + ppa + dist + capacity + fixed + penalty + wear
     return {
-        "Energia [PLN]": energy, "Dystrybucja [PLN]": dist, "Opł. mocowa [PLN]": capacity,
+        "Energia [PLN]": energy, "Farma PPA [PLN]": ppa, "Dystrybucja [PLN]": dist, "Opł. mocowa [PLN]": capacity,
         "Opł. stała [PLN]": fixed, "Kara moc umowna [PLN]": penalty, "Zużycie BESS [PLN]": wear,
         "Koszt całk. [PLN]": total,
     }
