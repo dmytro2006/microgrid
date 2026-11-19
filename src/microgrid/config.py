@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 RHO_AIR = 1.225  # gęstość powietrza [kg/m^3]
+ROUTE_FACTOR = 1.3  # współczynnik wydłużenia trasy względem linii prostej (połączenia zastępcze)
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,8 @@ class SiteConfig:
     load_type: str = "kse"  # tryb "real": "kse" | "residential" | "office" | "commercial"
     # udział we wspólnej farmie wiatrowej poza miastem (0 → proporcjonalnie do mocy umownej wśród ALL_SITES)
     farm_share: float = 0.0
+    # GPZ 110/15 kV zasilający węzeł (nazwa stacji z OSM); None → najbliższy GPZ
+    gpz: str | None = None
     # OZE
     pv_kwp: float = 120.0
     inverter_eff: float = 0.96
@@ -219,7 +222,7 @@ KRAKOW_SITES_EXTRA: list[SiteConfig] = [
     SiteConfig(
         name="Bieżanów-Prokocim", lat=49.9885, lon=20.0450,  # OSM: 5 stacji / 14 pkt
         n_chargers=14, ev_per_day=45, p_max_kw=238, base_load_peak_kw=160, load_type="residential",
-        pv_kwp=90, wind_rated_kw=0, bess_kwh=150, bess_p_kw=75, v2g_share=0.4,
+        pv_kwp=90, wind_rated_kw=0, bess_kwh=150, bess_p_kw=75, v2g_share=0.4, gpz="GPZ Bieżanów",
     ),
     SiteConfig(
         name="Prądnik Biały", lat=50.0945, lon=19.9510,  # OSM: GO+EAuto 8 pkt + Lidl
