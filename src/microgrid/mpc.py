@@ -19,6 +19,9 @@ jest problem LP (HiGHS, ``scipy.optimize.linprog``) na horyzoncie ``horizon_h`` 
 Prognozy: ``perfect`` (znane wartości – górne ograniczenie jakości) lub ``persistence``
 (odbiory / PV / wiatr z poprzedniej doby; ceny RCE/RDN znane z wyprzedzeniem).
 Przyszłe przyjazdy EV nie są znane – plan obejmuje wyłącznie pojazdy podłączone.
+Awaria GPZ zapowiedziana (``SimConfig.outage_announced``): w krokach awarii P_imp = P_exp = 0
+(proporcjonalnie do części kroku), a bilans domykają zmienne odciążenia (koszt VOLL) i ograniczenia OZE –
+plan wcześniej ładuje BESS. Awaria nagła nie jest znana planowi; obsługuje ją dyspozycja wyspowa symulatora.
 Na koniec każdego kroku działa korekta czasu rzeczywistego (BESS → dławienie EV), gdy
 chwilowa moc odbiega od uśrednionej prognozy.
 """
@@ -35,6 +38,8 @@ M_OVERLOAD = 50.0    # PLN/kWh przeciążenia
 M_SHORTFALL = 5.0    # PLN/kWh niedoładowania pojazdu
 EPS_EARLY = 1e-5     # preferencja wcześniejszego ładowania przy równych kosztach
 RAMP_COST = 0.02     # PLN za 1 kW zmiany mocy w PCC między krokami (wygładzenie profilu)
+VOLL = 20.0          # PLN/kWh energii niedostarczonej odbiorcom (awaria GPZ, praca wyspowa)
+CURT_COST = 1e-3     # PLN/kWh ograniczenia OZE (tylko w czasie awarii)
 
 
 class MPCController(Controller):
@@ -70,8 +75,10 @@ class MPCController(Controller):
     def _forecast(self, s: SiteState, bounds: np.ndarray) -> dict[str, np.ndarray]:
         idx = (s.k + bounds / s.dt_min).astype(int)
         out = {}
-        for key in ("net", "p_imp", "p_exp"):
-            cs = np.concatenate([[0.0], np.cumsum(s.forecast[key])])
+        for key in ("net", "load", "p_imp", "p_exp", "grid_ok"):
+            if key not in s.forecast:
+                continue
+            cs = np.concatenate([[0.0], np.cumsum(np.asarray(s.forecast[key], dtype=float))])
             out[key] = (cs[idx[1:]] - cs[idx[:-1]]) / np.diff(idx)
         return out
 
@@ -121,8 +128,14 @@ class MPCController(Controller):
             ub.append(hi)
             return len(cols) - 1
 
-        imp = [var(Lh[j] * fc["p_imp"][j] / 1000.0, 0, None) for j in range(n)]
-        exp = [var(-Lh[j] * fc["p_exp"][j] / 1000.0, 0, None) for j in range(n)]
+        # awaria zapowiedziana: o_j – część kroku j bez zasilania z GPZ (wymiana z siecią tylko poza awarią)
+        out = 1.0 - fc["grid_ok"] if "grid_ok" in fc else np.zeros(n)
+        cap = [None if out[j] < 1e-9 else (1.0 - out[j]) * p_lim for j in range(n)]
+        imp = [var(Lh[j] * fc["p_imp"][j] / 1000.0, 0, cap[j]) for j in range(n)]
+        exp = [var(-Lh[j] * fc["p_exp"][j] / 1000.0, 0, cap[j]) for j in range(n)]
+        isl = {j: (var(VOLL * Lh[j], 0, out[j] * max(0.0, fc["load"][j])),                    # odciążenie
+                   var(CURT_COST * Lh[j], 0, out[j] * max(0.0, fc["load"][j] - fc["net"][j])))  # ograniczenie OZE
+               for j in range(n) if out[j] > 1e-9}
         ov = [var(M_OVERLOAD * Lh[j], 0, None) for j in range(n)]
 
         has_bess = bess.cap > 0 and bess.p_rated > 0
@@ -175,6 +188,9 @@ class MPCController(Controller):
         # bilans PCC i limity mocy (moc EV w kroku j działa tylko przez frac_j kroku)
         for j in range(n):
             coef = {imp[j]: 1.0, exp[j]: -1.0}
+            if j in isl:
+                coef[isl[j][0]] = 1.0
+                coef[isl[j][1]] = -1.0
             for i, (c, d) in ev_vars.items():
                 if j in c:
                     coef[c[j]] = -ev_frac[i][j]

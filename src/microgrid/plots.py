@@ -25,6 +25,22 @@ def _fmt_time(ax):
     ax.grid(alpha=0.3)
 
 
+def _outage_spans(ts: pd.DataFrame, dt_min: int) -> list[tuple]:
+    """Przedziały czasu awarii GPZ [(t_od, t_do)]."""
+    if "grid_ok" not in ts or ts["grid_ok"].all():
+        return []
+    out = ~ts["grid_ok"].astype(bool).to_numpy()
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], out.astype(int), [0]])))
+    t = ts["time"].to_numpy()
+    step = pd.Timedelta(minutes=dt_min)
+    return [(t[a], t[b - 1] + step) for a, b in zip(edges[::2], edges[1::2])]
+
+
+def _shade_outage(ax, spans, label: bool = False):
+    for i, (a, b) in enumerate(spans):
+        ax.axvspan(a, b, color="#495057", alpha=0.13, lw=0, label="Awaria GPZ" if label and i == 0 else None)
+
+
 def plot_timeseries(r: Results) -> plt.Figure:
     ts = r.ts
     t = ts["time"]
@@ -39,6 +55,10 @@ def plot_timeseries(r: Results) -> plt.Figure:
     ax.plot(t, ts["p_ev"], color=COLORS["ev"], lw=1.2, label="Σ EV (netto)")
     ax.plot(t, ts["p_bess"], color=COLORS["bess"], lw=1.2, label="BESS (+ład./−rozł.)")
     ax.plot(t, ts["p_grid"], color=COLORS["grid"], lw=2.0, label="P_grid (PCC)")
+    spans = _outage_spans(ts, r.cfg.dt_min)
+    if spans:
+        ax.fill_between(t, ts["load"], ts["load_dem"], where=ts["p_shed"] > 1e-6, color=COLORS["limit"],
+                        alpha=0.45, hatch="///", lw=0, step="post", label="Odciążenie (ENS)")
     p_max = r.site.p_max_kw
     ax.axhline(p_max, color=COLORS["limit"], ls="--", lw=1.2, label="P_max")
     over = ts["p_grid"].abs() > p_max
@@ -46,7 +66,7 @@ def plot_timeseries(r: Results) -> plt.Figure:
                     interpolate=True, label="Przeciążenie")
     # zakres osi dopasowany do danych (−P_max rysowane tylko przy dużym eksporcie)
     y_min = min(ts[["p_grid", "p_ev", "p_bess"]].min().min(), 0.0)
-    y_max = max(ts["p_grid"].max(), ts["load"].max(), p_max)
+    y_max = max(ts["p_grid"].max(), ts.get("load_dem", ts["load"]).max(), p_max)
     if y_min < -0.8 * p_max:
         ax.axhline(-p_max, color=COLORS["limit"], ls="--", lw=1.2)
     pad = 0.08 * (y_max - y_min)
@@ -71,11 +91,17 @@ def plot_timeseries(r: Results) -> plt.Figure:
     ax.legend(loc="upper left", ncol=3, fontsize=7, frameon=False)
     _fmt_time(ax)
 
+    for i, a in enumerate(axes):
+        _shade_outage(a, spans, label=i == 0)
+
     ax = axes[3]
     ax.plot(t, ts["price"], color="#7048e8", lw=1.2)
     ax.set_ylabel("Cena\n[PLN/MWh]")
     _fmt_time(ax)
 
+    if spans:  # legenda z pasem awarii
+        axes[0].legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=8, fontsize=7, frameon=False,
+                       borderaxespad=0.1)
     fig.tight_layout(h_pad=0.4)
     return fig
 
@@ -88,7 +114,9 @@ def plot_grid_comparison(results: dict, site_name: str) -> plt.Figure:
             continue
         p_max = r.site.p_max_kw
         ax.plot(r.ts["time"], r.ts["p_grid"], color=COLORS[strategy], lw=1.5, label=CONTROLLERS[strategy].label)
+        spans = _outage_spans(r.ts, r.cfg.dt_min)
     if p_max is not None:
+        _shade_outage(ax, spans, label=True)
         ax.axhline(p_max, color="k", ls="--", lw=1, label="P_max")
     ax.set_title(f"{site_name} – moc w węźle PCC: porównanie scenariuszy", fontweight="bold")
     ax.set_ylabel("P_grid [kW]")

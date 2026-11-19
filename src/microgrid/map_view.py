@@ -1,4 +1,4 @@
-"""Mapa Krakowa z przepływami mocy (pydeck / deck.gl, kafelki Carto – bez tokenu)."""
+"""Mapa Krakowa z przepływami mocy (pydeck / deck.gl, kafelki OpenFreeMap – bez klucza API)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import pydeck as pdk
 from .config import GRID_SUPPLY_POINT
 from .simulation import Results
 
-MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+MAP_STYLE = "https://tiles.openfreemap.org/styles/positron"  # OpenFreeMap: OSM, bez klucza
 
 # przesunięcia komponentów względem węzła PCC [stopnie]
 OFFSETS = {
@@ -51,9 +51,12 @@ def _flow(src, dst, p_kw, p_max, kind, label):
 def map_layers_data(results: list[Results], k: int) -> tuple[list[dict], list[dict], list[dict]]:
     """Zwraca (węzły, przepływy, etykiety) dla kroku czasowego k."""
     gpz = (GRID_SUPPLY_POINT["lat"], GRID_SUPPLY_POINT["lon"])
-    nodes = [{"position": [gpz[1], gpz[0]], "radius": 220, "color": NODE_COLORS["GPZ"] + [230],
-              "name": GRID_SUPPLY_POINT["name"], "info": "punkt umowny – sieć SN/WN"}]
-    flows, labels = [], [{"position": [gpz[1], gpz[0]], "text": "GPZ"}]
+    ok = bool(results[0].ts["grid_ok"].iloc[k]) if "grid_ok" in results[0].ts else True
+    nodes = [{"position": [gpz[1], gpz[0]], "radius": 220,
+              "color": (NODE_COLORS["GPZ"] if ok else [134, 142, 150]) + [230],
+              "name": GRID_SUPPLY_POINT["name"],
+              "info": "punkt umowny – sieć SN/WN" if ok else "AWARIA – brak zasilania, węzły w pracy wyspowej"}]
+    flows, labels = [], [{"position": [gpz[1], gpz[0]], "text": "GPZ" if ok else "GPZ – AWARIA"}]
 
     for r in results:
         row = r.ts.iloc[k]
@@ -87,7 +90,12 @@ def map_layers_data(results: list[Results], k: int) -> tuple[list[dict], list[di
             else:
                 flows.append(_flow(pcc, pos, p, s.p_max_kw, "load", f"PCC → {comp}"))
 
-        if row["p_grid"] >= 0:
+        if not ok:
+            shed = f" · odciążenie {row['p_shed']:.1f} kW" if row.get("p_shed", 0) > 0.05 else ""
+            flows.append({**_flow(gpz, pcc, 0.0, s.p_max_kw, "import", f"GPZ ✕ {s.name}"),
+                          "width": 2.0, "c_src": [201, 42, 42], "c_dst": [201, 42, 42],
+                          "info": "brak zasilania – praca wyspowa" + shed})
+        elif row["p_grid"] >= 0:
             flows.append(_flow(gpz, pcc, row["p_grid"], s.p_max_kw, "import", f"GPZ → {s.name}"))
         else:
             flows.append(_flow(pcc, gpz, row["p_grid"], s.p_max_kw, "export", f"{s.name} → GPZ"))
@@ -141,6 +149,6 @@ def build_deck(results: list[Results], k: int, show_chargers: bool = True) -> pd
         layers.insert(0, pdk.Layer(
             "ScatterplotLayer", chargers, get_position="position", get_radius=35, radius_min_pixels=2.5,
             get_fill_color="dc ? [174, 62, 201, 210] : [132, 94, 247, 150]", pickable=True))
-    return pdk.Deck(layers=layers, initial_view_state=view, map_style=MAP_STYLE, map_provider="carto",
+    return pdk.Deck(layers=layers, initial_view_state=view, map_style=MAP_STYLE, map_provider="carto",  # = renderer MapLibre; styl z MAP_STYLE
                     tooltip={"html": "<b>{name}</b><br/>{info}",
                              "style": {"fontSize": "12px"}})

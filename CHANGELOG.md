@@ -2,6 +2,23 @@
 
 Wszystkie zmiany na gałęzi `feature/real-data-animations` względem `master` (`092cb05 Initial commit`).
 
+## [0.5.0] – 2026-11-19 · awaria GPZ (blackout), mapy bez klucza API
+
+### Dodane
+- **Symulacja awarii GPZ / blackoutu** (`SimConfig.outage_start_h`, `outage_dur_h`, `outage_announced`).
+  W oknie awarii wszystkie węzły pracują wyspowo (P_grid = 0); `island_dispatch` koryguje polecenia EMS:
+  - deficyt: BESS → ograniczenie ładowania EV → V2G → odciążenie odbiorów;
+  - nadwyżka: BESS → ograniczenie V2G → doładowanie EV → ograniczenie OZE.
+  - Awaria zapowiedziana: MPC ma w LP zmienne odciążenia (VoLL 20 PLN/kWh) i ograniczenia OZE,
+    więc zawczasu ładuje BESS. Przykład (AGH, 17:00, 5 h): ENS 440 → 387 kWh.
+- KPI: `Awaria GPZ [h]`, `ENS [kWh]`, `ENS [%]`, `Ograniczenie OZE [kWh]`; kolumny `load_dem`, `p_shed`,
+  `p_curt`, `grid_ok` w szeregu czasowym (`load` = moc faktycznie dostarczona).
+- Panel: sekcja „Awaria sieci (GPZ)”, pas awarii i odciążenie na wykresach, GPZ „AWARIA” na mapach.
+
+### Zmienione
+- Mapy bez klucza API: animacja na kafelkach OpenStreetMap, mapa pydeck na stylu OpenFreeMap (zamiast Carto).
+- Wyższe mapy w panelu (animowana 900 px, pydeck 850 px).
+
 ## [0.4.1] – 2026-11-18 · poprawka: panel ładował się kilkanaście minut
 
 ### Naprawione

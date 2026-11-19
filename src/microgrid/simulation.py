@@ -17,7 +17,7 @@ import simpy
 from .config import SimConfig, SiteConfig
 from .controller import CONTROLLERS, SiteState
 from .ev_generator import EV, TICK_EPS, Station, expected_arrivals, fleet_means, generate_evs, mean_parking_h
-from .grid_environment import BESS, pcc_balance
+from .grid_environment import BESS, island_dispatch, pcc_balance
 from .synthetic import generate_profiles
 from .tariff import DEFAULT_TARIFF, import_price
 
@@ -80,6 +80,9 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
         "load": fc_src["load"], "net": fc_src["load"] - fc_src["pv"] - fc_src["wind"],
         "p_imp": import_price(profiles["price"], times), "p_exp": profiles["price"],
     }
+    grid_ok = cfg.grid_available()
+    # awaria zapowiedziana → MPC zna okno z wyprzedzeniem; nagła → plan zakłada sprawną sieć
+    forecast["grid_ok"] = grid_ok if cfg.outage_announced else np.ones_like(grid_ok)
     if cfg.mpc_ev_forecast:
         hod = (np.arange(cfg.n_steps) * cfg.dt_min / 60.0) % 24.0
         forecast["ev_arrivals"] = expected_arrivals(site, cfg)
@@ -105,14 +108,25 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
             )
             p_ev_cmd, p_bess_cmd = controller.decide(state)
 
-            p_ch = p_dis = 0.0
+            # ochrona przed poleceniami niewykonalnymi fizycznie
+            ch_max = {ev.id: ev.max_charge_kw(dt_h) for ev in state.active}
+            dis_max = {ev.id: ev.max_discharge_kw(t, dt_h, cfg.ev.v2g_soc_floor) for ev in state.active}
+            p_ev = {}
             for ev in state.active:
                 p = p_ev_cmd.get(ev.id, 0.0)
-                # ochrona przed poleceniami niewykonalnymi fizycznie
-                if p >= 0:
-                    p = min(p, ev.max_charge_kw(dt_h))
-                else:
-                    p = -min(-p, ev.max_discharge_kw(t, dt_h, cfg.ev.v2g_soc_floor))
+                p_ev[ev.id] = min(p, ch_max[ev.id]) if p >= 0 else -min(-p, dis_max[ev.id])
+            b_ch, b_dis = bess.max_charge_kw(dt_h), bess.max_discharge_kw(dt_h)
+            p_bess_cmd = min(p_bess_cmd, b_ch) if p_bess_cmd >= 0 else -min(-p_bess_cmd, b_dis)
+
+            load, pv, wind = state.load, state.pv, state.wind
+            shed = curt = 0.0
+            if not grid_ok[k]:  # awaria GPZ – praca wyspowa, P_grid = 0
+                p_ev, p_bess_cmd, shed, curt = island_dispatch(
+                    load, pv + wind, p_ev, ch_max, dis_max, p_bess_cmd, b_ch, b_dis)
+
+            p_ch = p_dis = 0.0
+            for ev in state.active:
+                p = p_ev[ev.id]
                 ev.apply(p, dt_h)
                 trace.append((k, ev.id, ev.soc, p))
                 if p >= 0:
@@ -121,9 +135,23 @@ def run(site: SiteConfig, strategy: str, cfg: SimConfig | None = None) -> Result
                     p_dis += -p
             p_bess = bess.step(p_bess_cmd, dt_h)
             p_ev_sum = p_ch - p_dis
-            p_grid = pcc_balance(state.load, p_ev_sum, p_bess, state.pv, state.wind)
+            if not grid_ok[k]:
+                # domknięcie bilansu (resztki numeryczne → odciążenie / ograniczenie OZE)
+                resid = pcc_balance(load - shed, p_ev_sum, p_bess, pv + wind - curt, 0.0)
+                if resid > 0:
+                    shed = min(load, shed + resid)
+                else:
+                    curt = min(pv + wind, curt - resid)
+                if pv + wind > 0:  # ograniczenie OZE proporcjonalnie do produkcji
+                    f = 1.0 - curt / (pv + wind)
+                    pv, wind = pv * f, wind * f
+                load -= shed
+            p_grid = pcc_balance(load, p_ev_sum, p_bess, pv, wind)
+            if not grid_ok[k]:
+                p_grid = 0.0 if abs(p_grid) < 1e-6 else p_grid
             rows.append({
-                "t_min": t, "load": state.load, "pv": state.pv, "wind": state.wind,
+                "t_min": t, "load": load, "pv": pv, "wind": wind,
+                "load_dem": state.load, "p_shed": shed, "p_curt": curt, "grid_ok": bool(grid_ok[k]),
                 "price": state.price, "p_ev": p_ev_sum, "p_ev_ch": p_ch, "p_ev_dis": p_dis,
                 "p_bess": p_bess, "soc_bess": bess.soc, "p_grid": p_grid,
                 "n_active": len(state.active), "n_queue": station.queue_len,

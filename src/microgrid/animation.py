@@ -1,6 +1,6 @@
 """Animacje działające po stronie przeglądarki (bez przeładowań Streamlit).
 
-- ``animated_map_html``  – mapa Krakowa (deck.gl + kafelki Carto): cząstki energii płyną
+- ``animated_map_html``  – mapa Krakowa (deck.gl + kafelki OpenStreetMap, bez klucza API): cząstki energii płyną
   wzdłuż połączeń z prędkością i gęstością ∝ mocy, węzły PCC zmieniają kolor wg obciążenia.
 - ``flow_diagram_html``  – schemat jednego węzła PCC (SVG): animowane przepływy mocy,
   obracająca się turbina (prędkość ∝ wiatr), słońce (jasność ∝ PV), poziom SoC BESS,
@@ -32,7 +32,9 @@ def _series(r: Results, step: int) -> dict:
     ts = r.ts.iloc[::step]
     cols = ["load", "pv", "wind", "p_ev", "p_ev_ch", "p_ev_dis", "p_bess", "soc_bess", "p_grid", "price",
             "n_active", "n_queue"]
-    return {c: np.round(ts[c].to_numpy(dtype=float), 2).tolist() for c in cols}
+    out = {c: np.round(ts[c].to_numpy(dtype=float), 2).tolist() for c in cols}
+    out["grid_ok"] = (ts["grid_ok"].astype(int).tolist() if "grid_ok" in ts else [1] * len(ts))
+    return out
 
 
 _DAYS_PL = ("pn", "wt", "śr", "cz", "pt", "sb", "nd")
@@ -120,11 +122,15 @@ def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool =
 #legend i {{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }}
 #hud {{ position:absolute; z-index:2; right:10px; top:10px; background:rgba(255,255,255,.92); color:#1d2733;
   padding:8px 10px; border-radius:6px; font-size:12px; min-width:220px; box-shadow:0 1px 4px rgba(0,0,0,.2); }}
+#attr {{ position:absolute; z-index:2; right:4px; bottom:2px; font-size:10px; color:#333;
+  background:rgba(255,255,255,.75); padding:0 4px; border-radius:3px; }}
+#attr a {{ color:inherit; }}
 #hud table {{ border-collapse:collapse; width:100%; }} #hud td {{ padding:1px 4px; text-align:right; }}
 #hud td:first-child {{ text-align:left; }}
 </style></head><body>
 {_CONTROLS_HTML}
-<div id="map"><div id="legend"></div><div id="hud"></div></div>
+<div id="map"><div id="legend"></div><div id="hud"></div>
+<div id="attr">© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a></div></div>
 <script>
 const D = {json.dumps(payload, ensure_ascii=False)};
 {_CONTROLS_JS}
@@ -144,8 +150,10 @@ const gpz = [D.gpz.lon, D.gpz.lat];
 const phase = {{}};   // faza przesunięcia cząstek dla każdego połączenia
 
 function buildFrame(k, dt) {{
-  const nodes = [{{pos: gpz, r: 230, c: C.GPZ.concat(235), name: D.gpz.name}}];
-  const links = [], dots = [], labels = [{{pos: [gpz[0], gpz[1] + 0.0025], text: 'GPZ'}}];
+  const ok = D.sites[0].series.grid_ok[k];
+  const nodes = [{{pos: gpz, r: 230, c: ok ? C.GPZ.concat(235) : [134, 142, 150, 235],
+                  name: D.gpz.name + (ok ? '' : ' – AWARIA (brak zasilania)')}}];
+  const links = [], dots = [], labels = [{{pos: [gpz[0], gpz[1] + 0.0025], text: ok ? 'GPZ' : 'GPZ – AWARIA'}}];
   D.sites.forEach((s, si) => {{
     const S = s.series, pcc = [s.lon, s.lat], pg = S.p_grid[k];
     nodes.push({{pos: pcc, r: 170, c: loadColor(Math.abs(pg) / s.p_max), name: s.name}});
@@ -162,10 +170,10 @@ function buildFrame(k, dt) {{
                    c: out ? [255, 196, 40] : [232, 89, 12]}});
     }}
     flows.push({{id: si + 'grid', a: pg >= 0 ? gpz : pcc, b: pg >= 0 ? pcc : gpz, p: Math.abs(pg),
-                 c: pg >= 0 ? [60, 110, 200] : [40, 170, 90]}});
+                 c: pg >= 0 ? [60, 110, 200] : [40, 170, 90], cut: !ok}});
     for (const f of flows) {{
-      links.push({{a: f.a, b: f.b, w: 1 + 7 * Math.min(f.p, 1.5 * s.p_max) / s.p_max,
-                  c: f.p < 0.5 ? [150, 150, 150, 60] : f.c.concat(110)}});
+      links.push({{a: f.a, b: f.b, w: f.cut ? 2.5 : 1 + 7 * Math.min(f.p, 1.5 * s.p_max) / s.p_max,
+                  c: f.cut ? [201, 42, 42, 170] : f.p < 0.5 ? [150, 150, 150, 60] : f.c.concat(110)}});
       if (f.p < 0.5) continue;
       const v = 0.15 + 1.2 * Math.min(f.p, 1.5 * s.p_max) / s.p_max;      // prędkość cząstek
       phase[f.id] = ((phase[f.id] || 0) + dt * v) % 1;
@@ -191,11 +199,12 @@ const deckgl = new deck.Deck({{
   getTooltip: ({{object}}) => object && object.name ? object.name : null,
 }});
 const tiles = new deck.TileLayer({{
-  id: 'tiles', data: 'https://basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}@2x.png',
+  id: 'tiles', data: 'https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
   minZoom: 0, maxZoom: 19, tileSize: 256,
   renderSubLayers: props => {{
     const {{west, south, east, north}} = props.tile.bbox;
-    return new deck.BitmapLayer(props, {{data: null, image: props.data, bounds: [west, south, east, north]}});
+    return new deck.BitmapLayer(props, {{data: null, image: props.data, bounds: [west, south, east, north],
+      desaturate: 0.75, tintColor: [255, 255, 255]}});
   }}
 }});
 const hud = document.getElementById('hud'), clock = document.getElementById('clock');
@@ -219,7 +228,10 @@ function render(k, dt) {{
   ]}});
   if (k !== lastK) {{
     lastK = k; clock.textContent = D.times[k];
-    hud.innerHTML = '<b>' + D.times[k] + '</b><table><tr class="muted"><td></td><td>P_grid</td><td>EV</td><td>PV</td><td>SoC</td></tr>' +
+    const ok = D.sites[0].series.grid_ok[k];
+    hud.innerHTML = (ok ? '' : '<div style="background:#c92a2a;color:#fff;font-weight:700;padding:3px 6px;' +
+      'border-radius:4px;margin-bottom:4px">⚠ Awaria GPZ – praca wyspowa</div>') +
+      '<b>' + D.times[k] + '</b><table><tr class="muted"><td></td><td>P_grid</td><td>EV</td><td>PV</td><td>SoC</td></tr>' +
       D.sites.map(s => {{ const S = s.series; return `<tr><td>${{s.name.split(' ')[0]}}</td><td>${{S.p_grid[k].toFixed(0)}}</td>` +
         `<td>${{S.p_ev[k].toFixed(0)}}</td><td>${{S.pv[k].toFixed(0)}}</td><td>${{(100*S.soc_bess[k]).toFixed(0)}}%</td></tr>`; }}).join('') +
       '</table><div class="muted" style="color:#6b7785">kW · cena ' + D.sites[0].series.price[k].toFixed(0) + ' PLN/MWh</div>';

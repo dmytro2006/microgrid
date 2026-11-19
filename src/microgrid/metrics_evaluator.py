@@ -53,6 +53,23 @@ def kpis(r: Results) -> dict[str, float]:
         "EV łącznie": float(len(ses)),
         "EV odrzucone": float(ses["status"].isin(["balked", "reneged"]).sum()),
         "Śr. oczekiwanie [min]": float(served["wait_min"].mean()) if len(served) else 0.0,
+        **outage_kpis(r),
+    }
+
+
+def outage_kpis(r: Results) -> dict[str, float]:
+    """Wskaźniki pracy wyspowej (awaria GPZ): czas, energia niedostarczona, ograniczenie OZE."""
+    ts, dt_h = r.ts, r.cfg.dt_h
+    if "grid_ok" not in ts:
+        return {"Awaria GPZ [h]": 0.0, "ENS [kWh]": 0.0, "ENS [%]": 0.0, "Ograniczenie OZE [kWh]": 0.0}
+    out = ~ts["grid_ok"].astype(bool)
+    dem = float(ts.loc[out, "load_dem"].sum() * dt_h)
+    ens = float(ts["p_shed"].sum() * dt_h)
+    return {
+        "Awaria GPZ [h]": float(out.sum() * dt_h),
+        "ENS [kWh]": ens,                                    # energia niedostarczona odbiorcom
+        "ENS [%]": 100 * ens / dem if dem > 0 else 0.0,      # względem zapotrzebowania w czasie awarii
+        "Ograniczenie OZE [kWh]": float(ts["p_curt"].sum() * dt_h),
     }
 
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+import numpy as np
+
 RHO_AIR = 1.225  # gęstość powietrza [kg/m^3]
 
 
@@ -133,6 +135,11 @@ class SimConfig:
     forecast: str = "perfect"        # prognoza dla MPC: "perfect" | "persistence" (wczorajszy profil)
     mpc_ev_forecast: bool = True     # MPC uwzględnia oczekiwane przyjazdy EV (rezerwa mocy / energii)
     ev: EVParams = field(default_factory=EVParams)
+    # awaria GPZ (blackout): od outage_start_h [h od startu] przez outage_dur_h [h] brak zasilania z sieci,
+    # węzły pracują wyspowo (P_grid = 0). outage_announced → MPC zna okno awarii z wyprzedzeniem.
+    outage_start_h: float | None = None
+    outage_dur_h: float = 4.0
+    outage_announced: bool = False
 
     @property
     def horizon_min(self) -> int:
@@ -145,6 +152,14 @@ class SimConfig:
     @property
     def dt_h(self) -> float:
         return self.dt_min / 60.0
+
+    def grid_available(self) -> np.ndarray:
+        """Maska kroków z dostępnym zasilaniem z GPZ (False = awaria / blackout)."""
+        ok = np.ones(self.n_steps, dtype=bool)
+        if self.outage_start_h is not None and self.outage_dur_h > 0:
+            t = np.arange(self.n_steps) * self.dt_min / 60.0
+            ok[(t >= self.outage_start_h) & (t < self.outage_start_h + self.outage_dur_h)] = False
+        return ok
 
 
 # Przykładowe węzły w Krakowie (parametry syntetyczne).

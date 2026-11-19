@@ -71,6 +71,18 @@ def main() -> None:
         ev_fc = st.toggle("MPC: prognoza przyjazdów EV", value=True,
                           help="Plan rezerwuje moc i energię dla aut, które statystycznie dopiero przyjadą.")
 
+        st.header("Awaria sieci (GPZ)")
+        outage = st.toggle("⚠️ Symuluj awarię / blackout", value=False,
+                           help="Brak zasilania z GPZ – węzły pracują wyspowo (P_grid = 0). Deficyt: BESS → "
+                                "ograniczenie ładowania EV → V2G → odciążenie odbiorów; nadwyżka: BESS → EV → "
+                                "ograniczenie OZE.")
+        out_start = st.slider("Początek awarii [h od startu]", 0.0, days * 24.0 - 0.5, min(18.0, days * 24.0 - 1.0),
+                              step=0.5, disabled=not outage)
+        out_dur = st.slider("Czas trwania [h]", 0.5, 24.0, 4.0, step=0.5, disabled=not outage)
+        out_ann = st.toggle("Awaria zapowiedziana (MPC zna ją z wyprzedzeniem)", value=False, disabled=not outage,
+                            help="Np. planowane wyłączenie OSD. MPC (D) zawczasu ładuje BESS; pozostałe strategie "
+                                 "nie korzystają z prognoz.")
+
         st.header("Lokalizacja")
         all_names = [s.name for s in ALL_SITES]
         chosen = st.multiselect("Węzły w symulacji", all_names, default=all_names,
@@ -102,6 +114,8 @@ def main() -> None:
     sites = [edited if s.name == site_name else s for s in ALL_SITES if s.name in names]
     cfg = SimConfig(days=days, dt_min=int(dt), seed=int(seed), data_source=source,
                     ev_fleet="real" if fleet else "synthetic", forecast=forecast, mpc_ev_forecast=ev_fc,
+                    outage_start_h=float(out_start) if outage else None, outage_dur_h=float(out_dur),
+                    outage_announced=bool(out_ann),
                     start=f"{start:%Y-%m-%d} 00:00" if source == "real" else SimConfig.start)
     caption.caption(
         "Hybrydowa symulacja DES (SimPy) + krok bilansowy Δt. Dane wejściowe: " +
@@ -173,6 +187,18 @@ def main() -> None:
             delta = k_now[m] - k_base[m]
             col.metric(m, f"{k_now[m]:.2f}", f"{delta:+.2f} vs A" if strategy != "A" else None,
                        delta_color="inverse" if better_low else "normal")
+        if cfg.outage_start_h is not None:
+            t0 = pd.Timestamp(cfg.start) + pd.Timedelta(hours=cfg.outage_start_h)
+            st.warning(f"⚠️ Awaria GPZ {t0:%d.%m %H:%M} – "
+                       f"{t0 + pd.Timedelta(hours=cfg.outage_dur_h):%d.%m %H:%M}: praca wyspowa"
+                       f"{' (zapowiedziana)' if cfg.outage_announced else ' (nagła)'}.")
+            cols = st.columns(4)
+            for col, m in zip(cols, ["Awaria GPZ [h]", "ENS [kWh]", "ENS [%]", "Ograniczenie OZE [kWh]"]):
+                delta = k_now[m] - k_base[m]
+                col.metric(m, f"{k_now[m]:.1f}", f"{delta:+.1f} vs A" if strategy != "A" and m != "Awaria GPZ [h]"
+                           else None, delta_color="inverse",
+                           help="ENS – energia niedostarczona odbiorcom (odciążenie) w czasie awarii."
+                           if m.startswith("ENS") else None)
         fig = plot_timeseries(r)
         show(fig)
         res = energy_balance_residuals(r)
@@ -199,11 +225,13 @@ def main() -> None:
         rs = [results[(s.name, map_strategy)] for s in sites]
         times = rs[0].ts["time"]
         k_peak = int(sum(x.ts["p_grid"].abs() for x in rs).idxmax())
+        if not rs[0].ts["grid_ok"].all():  # awaria → start od jej początku
+            k_peak = int((~rs[0].ts["grid_ok"]).idxmax())
         if animated:
             with c2:
                 st.markdown("Cząstki płyną od źródła do odbiorcy; ich prędkość i liczba ∝ moc. "
                             "Kolor PCC: 🟢 niskie → 🔴 przeciążenie (|P_grid| / P_max). Start: chwila szczytu.")
-            st.iframe(animated_map_html(rs, start_k=k_peak, autoplay=False), height=640)
+            st.iframe(animated_map_html(rs, start_k=k_peak, autoplay=False, height=880), height=900)
             k = k_peak
             st.caption(f"Tabela: stan w chwili szczytu {times.iloc[k]:%d.%m %H:%M}")
         else:
@@ -212,7 +240,7 @@ def main() -> None:
                               help="Domyślnie: chwila największego łącznego poboru z sieci")
                 st.markdown(f"**{times.iloc[k]:%d.%m.%Y %H:%M}** – grubość łuku ∝ moc, kolor węzła PCC: "
                             "🟢 niskie → 🔴 przeciążenie (|P_grid| / P_max)")
-            st.pydeck_chart(build_deck(rs, k), height=600)
+            st.pydeck_chart(build_deck(rs, k), height=850)
             st.caption(f"Tabela: stan w chwili {times.iloc[k]:%d.%m %H:%M}")
         snap = pd.DataFrame([{
             "Lokalizacja": x.site.name, "P_grid [kW]": x.ts["p_grid"].iloc[k], "P_max [kW]": x.site.p_max_kw,
