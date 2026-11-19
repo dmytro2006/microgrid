@@ -186,3 +186,17 @@ def test_no_grid_supply_point_left():
     root = pathlib.Path(__file__).resolve().parents[1]
     for p in [*(root / "src").rglob("*.py"), root / "app.py", root / "run.py"]:
         assert "GRID_SUPPLY_POINT" not in p.read_text(encoding="utf-8"), p
+
+
+def test_coordinate_nan_feeder_nie_maskuje_przeciazenia_transformatora():
+    """Obciążenie linii NaN (brak rozpływu na odcinku) nie może ukryć przeciążenia transformatora 130%."""
+    from types import SimpleNamespace
+
+    from microgrid.cosim import coordinate
+    from microgrid.simulation import Proposal
+
+    prop = Proposal(k=0, p_ev={}, p_bess=0.0, load=1000.0, pv=0.0, wind=0.0, ch_max={}, dis_max={}, b_ch=0.0,
+                    b_dis=0.0, shed=0.0, curt=0.0, farm_k=0.0, grid_ok=True)
+    res = SimpleNamespace(v_node={"x": 1.0}, feeder_loading={"x": float("nan")}, trafo_loading={"x": 130.0})
+    out = coordinate({"x": prop}, res, SimpleNamespace(site_names=["x"]))
+    assert out.get("x", 0.0) != 0.0

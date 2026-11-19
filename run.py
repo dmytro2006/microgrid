@@ -83,7 +83,7 @@ def main() -> None:
     with pd.option_context("display.width", 250, "display.max_columns", 30, "display.float_format", "{:.2f}".format):
         print("\n=== KPI ===")
         print(table)
-    table.to_csv(out / "kpi.csv")
+    table.dropna(axis=1, how="all").to_csv(out / "kpi.csv")
     if nets:
         net_table = pd.DataFrame({s: network_summary(nr, cfg.dt_h) for s, nr in nets.items()}).T
         net_table.index.name = "Scenariusz"

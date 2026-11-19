@@ -43,7 +43,7 @@ def show(fig) -> None:
     st.image(buf.getvalue(), width="stretch")
 
 
-@st.cache_data(show_spinner="Symulacja w toku…")
+@st.cache_data(show_spinner="Symulacja w toku… (z siecią 110/15 kV pierwsze liczenie ok. 1 min)")
 def simulate(sites_t: tuple, cfg: SimConfig):
     """Wyniki węzłów {(węzeł, strategia): Results} i – przy symulacji sieci – {strategia: NetworkResults}."""
     if cfg.network:
@@ -65,6 +65,7 @@ NET_ASSUMPTIONS = (
     f"cos φ = {C.BG_COS_PHI:g}. Linie 110 kV: napowietrzne 243-AL1/39-ST1A, kable N2XS(FL)2Y 1×240; "
     f"linie 15 kV: NA2XS2Y 1×240. GPZ 2 × 25 MVA 110/15 kV (vk 11%), transformator węzła 15/0,4 kV "
     f"Sn = P_max/0,95 (vk 6%). EC Łęg {C.CHP_P_MIN_KW / 1000:g}–{C.CHP_P_MAX_KW / 1000:g} MW (zależnie od "
+    f"temperatury: moc rośnie od {C.CHP_T_START_C:g} °C do {C.CHP_T_DESIGN_C:g} °C średniej dobowej "
     f"temperatury), ZTPO {C.ZTPO_KW / 1000:g} MW, napięcie w stacjach PSE {C.EXT_GRID_VM_PU:g} p.u. "
     f"Granice: U 0,90–1,10 p.u., obciążenie ≤ 100%.")
 
@@ -101,7 +102,7 @@ def main() -> None:
         st.header("Sieć")
         network = st.toggle("Sieć 110/15 kV (rozpływ mocy)", value=True, key="network",
                             help="Wspólna symulacja węzłów w rzeczywistej sieci WN Krakowa (OSM) z rozpływem mocy "
-                                 "w każdym kroku: napięcia nN, obciążenia linii 15 kV, transformatorów i linii 110 kV.")
+                                 "w każdym kroku: napięcia nN, obciążenia linii 15 kV, transformatorów i linii 110 kV. Z siecią pierwsze liczenie trwa ok. 1 min (kolejne – z pamięci podręcznej).")
         net_ctrl = st.toggle("Koordynator sieciowy", value=True, key="net_ctrl", disabled=not network,
                              help="Węzeł naruszający ograniczenia sieci (U poza 0,90–1,10 p.u., obciążenie > 100%) "
                                   "dostaje żądanie zmiany mocy PCC: BESS → EV → ograniczenie PV/wiatru.")
@@ -192,6 +193,9 @@ def main() -> None:
     except ConnectionError as e:
         st.error(f"Nie udało się pobrać danych rzeczywistych ({e}). Przełącz na dane syntetyczne "
                  "albo wybierz datę, dla której dane są już w `data/cache`.")
+        st.stop()
+    except RuntimeError as e:
+        st.error(f"Brak danych sieci OSM w `data/cache` ({e}) – wyłącz sieć 110/15 kV albo przywróć plik danych.")
         st.stop()
     table = kpi_table(results)
 
@@ -441,12 +445,15 @@ def main() -> None:
         hc_strat = c1.selectbox("Strategia ", list(CONTROLLERS), index=0, key="hc_strategy",
                                 format_func=lambda k: CONTROLLERS[k].label)
         hc_max = c2.select_slider("Szukaj do [kWp]", options=[1000, 2000, 5000, 10000], value=5000, key="hc_max")
+        hc_key = (tuple((s.name, s.pv_kwp) for s in sites), cfg.start, cfg.data_source, hc_strat, hc_max)
         if st.button("▶ Wyznacz zdolność przyłączeniową", key="hc_run"):
             with st.spinner(f"Zdolność przyłączeniowa PV {len(sites)} węzłów…"):
-                st.session_state["hosting"] = hosting_capacity_table(
-                    sites, dataclasses.replace(cfg, pv_multiplier=1.0, outage_gpz=()), hc_strat, float(hc_max))
-        if "hosting" in st.session_state:
-            st.dataframe(st.session_state["hosting"].style.format({"PV obecnie [kWp]": "{:.0f}",
+                st.session_state["hosting"] = (hc_key, hosting_capacity_table(
+                    sites, dataclasses.replace(cfg, pv_multiplier=1.0, outage_gpz=()), hc_strat, float(hc_max)))
+        if "hosting" in st.session_state and st.session_state["hosting"][0] != hc_key:
+            st.info("Ustawienia zmieniły się – przelicz ponownie.")
+        elif "hosting" in st.session_state:
+            st.dataframe(st.session_state["hosting"][1].style.format({"PV obecnie [kWp]": "{:.0f}",
                                                                    "Zdolność PV [kWp]": "{:.0f}"}),
                          width="stretch")
 

@@ -70,7 +70,7 @@ Eksport rozliczany po cenie spot.</p>""")
 
     parts.append("<h2>Porównanie lokalizacji</h2>" + _svg(plot_kpi_bars(table)))
     parts.append("<h2>Pełna tabela KPI</h2><div class='scroll'>" +
-                 table.to_html(float_format=lambda x: f"{x:,.2f}".replace(",", " ")) + "</div>")
+                 table.dropna(axis=1, how="all").to_html(float_format=lambda x: f"{x:,.2f}".replace(",", " ")) + "</div>")
     parts.append("<p class='meta'>Źródła danych: Open-Meteo Historical Weather API, PSE API raportów "
                  "(rce-pln, his-wlk-cal), © współtwórcy OpenStreetMap (ODbL).</p></body></html>")
     return "\n".join(parts)

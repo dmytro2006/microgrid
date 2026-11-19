@@ -77,7 +77,7 @@ def coordinate(props: dict[str, Proposal], res: StepResult, model: GridModel) ->
         p = pcc_kw(prop)
         a = abs(p)
         need = 0.0
-        load_pct = max(res.feeder_loading[name], res.trafo_loading[name])
+        load_pct = float(np.fmax(res.feeder_loading[name], res.trafo_loading[name]))
         if load_pct > LOADING_MAX:
             need = max(need, a * (1.0 - LOADING_MAX / load_pct) * COORD_MARGIN)
         v = res.v_node[name]
