@@ -145,3 +145,44 @@ def test_hosting_capacity_agh():
         assert h["kWp"] > AGH.pv_kwp
         assert h["ograniczenie"] in {"transformator", "linia SN", "napięcie", "brak (≥ maks.)"}
     assert a["kWp"] <= b["kWp"] + 25.0  # BESS zjada część nadwyżki
+
+
+# ------------------------------------------------------------------ mapa prawdziwej sieci (Task 9)
+def test_static_map_shows_real_network(all_c):
+    from microgrid.map_view import build_deck
+
+    res, nr = all_c
+    rs = [res[s.name] for s in ALL_SITES]
+    import json
+
+    deck = json.dumps(json.loads(build_deck(rs, 50, nr=nr).to_json()), ensure_ascii=False)
+    assert "SE Skawina" in deck and "GPZ AGH" in deck
+    assert "połączenie zastępcze (luka w OSM)" in deck
+    assert "GPZ – sieć nadrzędna" not in deck
+    assert "SE Skawina" in build_deck(rs, 50).to_json()  # bez rozpływu też widać sieć
+
+
+def test_animated_map_has_grid_payload(all_c):
+    import json
+    import re
+
+    from microgrid.animation import animated_map_html
+
+    res, nr = all_c
+    rs = [res[s.name] for s in ALL_SITES]
+    html = animated_map_html(rs, nr=nr)
+    assert '"grid":' in html and '"GPZ Bonarka"' in html
+    payload = re.search(r"const D = (.*?);\n", html).group(1)
+    d = json.loads(payload)  # poprawny JSON (bez NaN)
+    assert len(d["grid"]["load"]) == len(d["times"])
+    assert len(d["grid"]["load"][0]) == len(nr.branches)
+    assert "gpz" not in d  # brak umownego GPZ
+    assert "SE Skawina" in animated_map_html(rs)
+
+
+def test_no_grid_supply_point_left():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for p in [*(root / "src").rglob("*.py"), root / "app.py", root / "run.py"]:
+        assert "GRID_SUPPLY_POINT" not in p.read_text(encoding="utf-8"), p

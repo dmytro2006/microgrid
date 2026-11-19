@@ -34,7 +34,7 @@ from .config import (
     SiteConfig,
 )
 from .grid_osm import PowerData
-from .grid_topology import Branch, hv_branches, km
+from .grid_topology import Branch, hv_branches, km, nearest_district_gpz
 from .grid_topology import site_gpz as _site_gpz
 
 LINE_OH_110 = "243-AL1/39-ST1A 110.0"
@@ -135,8 +135,7 @@ class GridModel:
         self._chp = pp.create_sgen(net, self._bus110[CHP_STATION], p_mw=0.0, name="Elektrociepłownia Łęg")
         self._ztpo = pp.create_sgen(net, self._bus110[ZTPO_STATION], p_mw=0.0, name="ZTPO")
         farm_xy = (WIND_FARM_SITE["lat"], WIND_FARM_SITE["lon"])
-        self.farm_gpz: str = min(self.gpz_names,
-                                 key=lambda n: km(farm_xy, (by_name[n].lat, by_name[n].lon)))
+        self.farm_gpz: str = nearest_district_gpz(*farm_xy, data).name
         self._farm = pp.create_sgen(net, self._bus15[self.farm_gpz], p_mw=0.0, name=WIND_FARM_SITE["name"],
                                     in_service=farm)
 

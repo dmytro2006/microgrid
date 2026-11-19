@@ -16,8 +16,21 @@ import json
 
 import numpy as np
 
-from .config import GRID_SUPPLY_POINT, WIND_FARM_SITE
-from .map_view import NODE_COLORS, OFFSETS, chargers_data, fit_zoom
+from .config import WIND_FARM_SITE
+from .grid_osm import PowerData, load_power_data
+from .grid_topology import site_gpz
+from .map_view import (
+    GREY,
+    NODE_COLORS,
+    OFFSETS,
+    SYNTHETIC_NOTE,
+    VOLTAGE_COLORS,
+    chargers_data,
+    farm_gpz,
+    fit_zoom,
+    grid_lines_data,
+    station_data,
+)
 from .simulation import Results
 from .tariff import import_price
 
@@ -34,7 +47,34 @@ def _series(r: Results, step: int) -> dict:
             "n_active", "n_queue"]
     out = {c: np.round(ts[c].to_numpy(dtype=float), 2).tolist() for c in cols}
     out["grid_ok"] = (ts["grid_ok"].astype(int).tolist() if "grid_ok" in ts else [1] * len(ts))
+    if "v_node" in ts:  # rozpływ mocy: napięcie nN [p.u.] i obciążenie linii 15 kV [%] (null = brak rozpływu)
+        out["v"] = [None if x != x else round(x, 3) for x in ts["v_node"].to_numpy(dtype=float)]
+        out["feed"] = [None if x != x else int(round(x)) for x in ts["feeder_loading"].to_numpy(dtype=float)]
     return out
+
+
+def _grid_payload(results: list[Results], step: int, data: PowerData, nr) -> dict:
+    """Prawdziwa sieć WN: linie OSM, gałęzie modelu z obciążeniem na klatkę (całkowite %, -1 = brak),
+    stacje; GPZ objęte awarią poza GPZ węzłów (``cfg.outage_gpz``) – maska na klatkę."""
+    lines = [{"path": ln["path"], "c": ln["color"], "name": ln["name"] + " – " + ln["info"]}
+             for ln in grid_lines_data(data)]
+    stations = [{"pos": s["position"], "r": s["radius"], "c": s["color"], "name": s["name"] + " – " + s["info"].replace("<br/>", " · "),
+                 "id": st.name, "pse": st.kind == "pse"}
+                for s, st in zip(station_data(data), data.substations)]
+    grid: dict = {"lines": lines, "stations": stations, "volt": {str(v): c for v, c in VOLTAGE_COLORS.items()},
+                  "branches": [], "load": None, "out_gpz": [], "out_mask": []}
+    if nr is not None:
+        grid["branches"] = [{"path": [[round(lon, 5), round(lat, 5)] for lat, lon in b.coords], "syn": b.synthetic,
+                             "name": f"{b.a} – {b.b} ({b.length_km:.1f} km)"
+                                     + (" – " + SYNTHETIC_NOTE if b.synthetic else "")}
+                            for b in nr.branches]
+        hv = np.nan_to_num(nr.hv_loading[::step], nan=-1.0)
+        grid["load"] = np.rint(hv).astype(int).tolist()
+    cfg = results[0].cfg
+    if cfg.outage_gpz:
+        grid["out_gpz"] = list(cfg.outage_gpz)
+        grid["out_mask"] = (~cfg.grid_available()[::step]).astype(int).tolist()
+    return grid
 
 
 _DAYS_PL = ("pn", "wt", "śr", "cz", "pt", "sb", "nd")
@@ -96,13 +136,17 @@ _CONTROLS_HTML = """
 
 
 # ------------------------------------------------------------------ mapa
-def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool = True, height: int = 620) -> str:
+def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool = True, height: int = 620,
+                      nr=None) -> str:
     step = _stride(len(results[0].ts))
+    data = load_power_data()
     sites = []
     for r in results:
         s = r.site
+        g = site_gpz(s, data) if data is not None else None
         sites.append({
             "name": s.name, "lat": s.lat, "lon": s.lon, "p_max": s.p_max_kw, "has_wind": s.wind_rated_kw > 0,
+            "gpz": [g.lon, g.lat] if g else None, "gpz_name": g.name if g else None,
             "series": _series(r, step),
         })
     lats = [r.site.lat for r in results]
@@ -118,12 +162,15 @@ def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool =
         farm = {"lat": WIND_FARM_SITE["lat"], "lon": WIND_FARM_SITE["lon"], "variant": variant,
                 "rated": 1000.0 * results[0].cfg.wind_farm_mw, "p": np.round(p[::step], 1).tolist(),
                 "prod": np.round(prod[::step], 1).tolist()}
+        fg = farm_gpz(data)
+        farm["gpz"] = [fg[1][1], fg[1][0]] if fg else None
+        farm["gpz_name"] = fg[0] if fg else None
         lats.append(WIND_FARM_SITE["lat"])
         lons.append(WIND_FARM_SITE["lon"])
     payload = {
         "times": _times(results[0], step), "sites": sites, "farm": farm,
         "center": [(max(lats) + min(lats)) / 2, (max(lons) + min(lons)) / 2],
-        "gpz": GRID_SUPPLY_POINT, "offsets": OFFSETS, "colors": NODE_COLORS,
+        "grid": _grid_payload(results, step, data, nr) if data is not None else None, "offsets": OFFSETS, "colors": NODE_COLORS,
         "zoom": fit_zoom(lats, lons),
         "chargers": [{"pos": c["position"], "name": c["name"] + " – " + c["info"], "dc": c["dc"]}
                      for c in chargers_data()],
@@ -150,10 +197,29 @@ def animated_map_html(results: list[Results], start_k: int = 0, autoplay: bool =
 <script>
 const D = {json.dumps(payload, ensure_ascii=False)};
 {_CONTROLS_JS}
-const C = D.colors;
+const C = D.colors, G = D.grid;
+const gpzNames = new Set(D.sites.map(s => s.gpz_name).filter(x => x));
+if (D.farm && D.farm.gpz_name) gpzNames.add(D.farm.gpz_name);
+const gpzPos = {{}};
+if (G) G.stations.forEach(s => gpzPos[s.id] = s.pos);
+function outGpz(k) {{   // GPZ objęte awarią w klatce k: GPZ węzłów bez zasilania + GPZ z cfg.outage_gpz
+  const out = new Set();
+  D.sites.forEach(s => {{ if (!s.series.grid_ok[k] && s.gpz_name) out.add(s.gpz_name); }});
+  if (G && G.out_mask.length && G.out_mask[k]) G.out_gpz.forEach(n => out.add(n));
+  return out;
+}}
+function vColor(v) {{
+  if (v === null || v === undefined) return [255, 255, 255];
+  if (v >= 0.95 && v <= 1.05) return [47, 158, 68];
+  if (v >= 0.90 && v <= 1.10) return [240, 140, 0];
+  return [201, 42, 42];
+}}
 const legend = document.getElementById('legend');
 legend.innerHTML = [['PV',C.PV],['Wiatr',C.Wiatr],['BESS',C.BESS],['Stacja EV',C['Stacja EV']],['GPZ',C.GPZ]]
   .map(([n,c]) => `<div><i style="background:rgb(${{c}})"></i>${{n}}</div>`).join('') +
+  (G ? Object.entries(G.volt).map(([v,c]) => `<div><i style="background:rgb(${{c}});border-radius:2px;height:4px"></i>linia ${{v}} kV (OSM)</div>`).join('') +
+       '<div><i style="background:rgb(201,42,42);border-radius:2px"></i>stacja PSE</div>' +
+       (G.load ? '<div class="muted" style="color:#6b7785">linie 110 kV i 15 kV: zielony → czerwony = obciążenie<br>obwódka PCC: napięcie nN (zielona 0,95–1,05 p.u.)</div>' : '') : '') +
   (D.farm ? `<div><i style="background:rgb(${{C.Farma}})"></i>farma wiatrowa (${{D.farm.variant === 'gpz' ? 'przy GPZ' : 'PPA'}})</div>` : '') +
   (D.chargers.length ? `<div><i style="background:rgb(132,94,247)"></i>ładowarki OSM (${{D.chargers.length}})</div>` : '') +
   '<div class="muted" style="color:#6b7785">kolor PCC: zielony → czerwony = |P_grid|/P_max<br>cząstki: kierunek i moc przepływu</div>';
@@ -163,17 +229,18 @@ function loadColor(r) {{
   if (r < 0.6) {{ const f = r / 0.6; return [47 + f*203, 158 + f*18, 68 - f*60, 235]; }}
   const f = (r - 0.6) / 0.4; return [250 - f*49, 176 - f*134, 8 + f*34, 235];
 }}
-const gpz = [D.gpz.lon, D.gpz.lat];
 const phase = {{}};   // faza przesunięcia cząstek dla każdego połączenia
 
 function buildFrame(k, dt) {{
-  const ok = D.sites[0].series.grid_ok[k];
-  const nodes = [{{pos: gpz, r: 230, c: ok ? C.GPZ.concat(235) : [134, 142, 150, 235],
-                  name: D.gpz.name + (ok ? '' : ' – AWARIA (brak zasilania)')}}];
-  const links = [], dots = [], labels = [{{pos: [gpz[0], gpz[1] + 0.0025], text: ok ? 'GPZ' : 'GPZ – AWARIA'}}];
+  const out = outGpz(k);
+  const nodes = [], links = [], dots = [], labels = [];
+  gpzNames.forEach(n => {{ if (gpzPos[n]) labels.push({{pos: [gpzPos[n][0], gpzPos[n][1] + 0.0025],
+                                                     text: n + (out.has(n) ? ' – AWARIA' : '')}}); }});
   D.sites.forEach((s, si) => {{
     const S = s.series, pcc = [s.lon, s.lat], pg = S.p_grid[k];
-    nodes.push({{pos: pcc, r: 170, c: loadColor(Math.abs(pg) / s.p_max), name: s.name}});
+    const ok = S.grid_ok[k], gpz = s.gpz;
+    nodes.push({{pos: pcc, r: 170, c: loadColor(Math.abs(pg) / s.p_max), lc: S.v ? vColor(S.v[k]) : [255, 255, 255],
+                name: s.name + (S.v && S.v[k] !== null ? ' – ' + S.v[k].toFixed(3) + ' p.u.' : '')}});
     labels.push({{pos: [s.lon, s.lat + 0.0058], text: s.name}});
     const comp = {{PV: S.pv[k], Wiatr: S.wind[k], BESS: S.p_bess[k], 'Stacja EV': S.p_ev[k]}};
     const flows = [];
@@ -186,11 +253,12 @@ function buildFrame(k, dt) {{
       flows.push({{id: si + name, a: out ? pos : pcc, b: out ? pcc : pos, p: Math.abs(p),
                    c: out ? [255, 196, 40] : [232, 89, 12]}});
     }}
-    flows.push({{id: si + 'grid', a: pg >= 0 ? gpz : pcc, b: pg >= 0 ? pcc : gpz, p: Math.abs(pg),
-                 c: pg >= 0 ? [60, 110, 200] : [40, 170, 90], cut: !ok}});
+    if (gpz) flows.push({{id: si + 'grid', a: pg >= 0 ? gpz : pcc, b: pg >= 0 ? pcc : gpz, p: Math.abs(pg),
+                 c: pg >= 0 ? [60, 110, 200] : [40, 170, 90], cut: !ok, feed: S.feed ? S.feed[k] : null}});
     for (const f of flows) {{
       links.push({{a: f.a, b: f.b, w: f.cut ? 2.5 : 1 + 7 * Math.min(f.p, 1.5 * s.p_max) / s.p_max,
-                  c: f.cut ? [201, 42, 42, 170] : f.p < 0.5 ? [150, 150, 150, 60] : f.c.concat(110)}});
+                  c: f.cut ? [201, 42, 42, 170] : (f.feed !== null && f.feed !== undefined) ? loadColor(f.feed / 100).slice(0, 3).concat(200)
+                     : f.p < 0.5 ? [150, 150, 150, 60] : f.c.concat(110)}});
       if (f.p < 0.5) continue;
       const v = 0.15 + 1.2 * Math.min(f.p, 1.5 * s.p_max) / s.p_max;      // prędkość cząstek
       phase[f.id] = ((phase[f.id] || 0) + dt * v) % 1;
@@ -202,11 +270,11 @@ function buildFrame(k, dt) {{
       }}
     }}
   }});
-  if (D.farm) {{   // farma wiatrowa poza miastem
-    const F = D.farm, fp = [F.lon, F.lat], p = F.p[k], gpzLink = F.variant === 'gpz';
+  if (D.farm && D.farm.gpz) {{   // farma wiatrowa poza miastem, przyłączona do najbliższego GPZ
+    const F = D.farm, fp = [F.lon, F.lat], p = F.p[k], gpzLink = F.variant === 'gpz', gpz = F.gpz;
     nodes.push({{pos: fp, r: 260, c: C.Farma.concat(235),
                 name: 'Farma wiatrowa: ' + F.prod[k].toFixed(0) + ' / ' + F.rated.toFixed(0) + ' kW' +
-                      (gpzLink ? ' (przyłączona do GPZ)' : ' (PPA – energia przez sieć OSD)')}});
+                      (gpzLink ? ' (przyłączona do ' + F.gpz_name + ')' : ' (PPA – energia przez sieć OSD)')}});
     labels.push({{pos: [F.lon, F.lat + 0.006], text: 'Farma wiatrowa'}});
     links.push({{a: fp, b: gpz, w: gpzLink ? 1 + 7 * Math.min(p, F.rated) / F.rated : 1.5,
                 c: gpzLink ? (p < 0.5 ? [150, 150, 150, 60] : [12, 166, 120, 120]) : [12, 166, 120, 70]}});
@@ -221,7 +289,7 @@ function buildFrame(k, dt) {{
       }}
     }}
   }}
-  return {{nodes, links, dots, labels}};
+  return {{nodes, links, dots, labels, out}};
 }}
 
 const deckgl = new deck.Deck({{
@@ -242,12 +310,30 @@ const tiles = new deck.TileLayer({{
       desaturate: 0.75, tintColor: [255, 255, 255]}});
   }}
 }});
+function gridLayers(k, out) {{
+  if (!G) return [];
+  const L = [new deck.PathLayer({{id: 'hv-osm', data: G.lines, getPath: d => d.path, getColor: d => d.c,
+    getWidth: 2, widthUnits: 'pixels', pickable: true}})];
+  if (G.load) {{   // gałęzie modelu 110 kV kolorowane obciążeniem w klatce k (-1 = brak rozpływu)
+    const ld = G.load[k];
+    L.push(new deck.PathLayer({{id: 'hv-model', data: G.branches.map((b, i) => ({{...b, l: ld[i]}})),
+      getPath: d => d.path, getWidth: 4, widthUnits: 'pixels', pickable: true,
+      getColor: d => {{ const c = d.l < 0 ? [134, 142, 150, 200] : loadColor(d.l / 100); return d.syn ? c.slice(0, 3).concat(110) : c; }},
+      updateTriggers: {{getColor: k}}}}));
+  }}
+  L.push(new deck.ScatterplotLayer({{id: 'stations', data: G.stations, getPosition: d => d.pos, getRadius: d => d.r,
+    radiusMinPixels: 4, getFillColor: d => out.has(d.id) ? [134, 142, 150, 235] : d.c, stroked: true,
+    getLineColor: [255, 255, 255], lineWidthMinPixels: 1, pickable: true,
+    updateTriggers: {{getFillColor: [...out].join()}}}}));
+  return L;
+}}
 const hud = document.getElementById('hud'), clock = document.getElementById('clock');
 let lastK = -1;
 function render(k, dt) {{
   const F = buildFrame(k, dt);
   deckgl.setProps({{layers: [
     tiles,
+    ...gridLayers(k, F.out),
     new deck.ScatterplotLayer({{id: 'osm', data: D.chargers, getPosition: d => d.pos, getRadius: 30,
       radiusMinPixels: 2.5, getFillColor: d => d.dc ? [174, 62, 201, 220] : [132, 94, 247, 160], pickable: true}}),
     new deck.LineLayer({{id: 'links', data: F.links, getSourcePosition: d => d.a, getTargetPosition: d => d.b,
@@ -255,17 +341,18 @@ function render(k, dt) {{
     new deck.ScatterplotLayer({{id: 'dots', data: F.dots, getPosition: d => d.pos, getRadius: d => d.r,
       getFillColor: d => d.c, radiusUnits: 'meters'}}),
     new deck.ScatterplotLayer({{id: 'nodes', data: F.nodes, getPosition: d => d.pos, getRadius: d => d.r,
-      getFillColor: d => d.c, stroked: true, getLineColor: [255, 255, 255], lineWidthMinPixels: 1.5,
-      pickable: true, radiusUnits: 'meters', updateTriggers: {{getFillColor: k, getRadius: k}}}}),
+      getFillColor: d => d.c, stroked: true, getLineColor: d => d.lc || [255, 255, 255],
+      lineWidthMinPixels: 2, pickable: true, radiusUnits: 'meters',
+      updateTriggers: {{getFillColor: k, getRadius: k, getLineColor: k}}}}),
     new deck.TextLayer({{id: 'labels', data: F.labels, getPosition: d => d.pos, getText: d => d.text,
       getSize: 13, getColor: [30, 30, 30], fontWeight: 'bold', characterSet: 'auto',
       getAlignmentBaseline: 'bottom', outlineWidth: 3, outlineColor: [255, 255, 255], fontSettings: {{sdf: true}}}}),
   ]}});
   if (k !== lastK) {{
     lastK = k; clock.textContent = D.times[k];
-    const ok = D.sites[0].series.grid_ok[k];
-    hud.innerHTML = (ok ? '' : '<div style="background:#c92a2a;color:#fff;font-weight:700;padding:3px 6px;' +
-      'border-radius:4px;margin-bottom:4px">⚠ Awaria GPZ – praca wyspowa</div>') +
+    const out = [...F.out];
+    hud.innerHTML = (out.length === 0 ? '' : '<div style="background:#c92a2a;color:#fff;font-weight:700;padding:3px 6px;' +
+      'border-radius:4px;margin-bottom:4px">⚠ AWARIA: ' + out.join(', ') + ' – praca wyspowa</div>') +
       '<b>' + D.times[k] + '</b><table><tr class="muted"><td></td><td>P_grid</td><td>EV</td><td>PV</td><td>SoC</td></tr>' +
       D.sites.map(s => {{ const S = s.series; return `<tr><td>${{s.name.split(' ')[0]}}</td><td>${{S.p_grid[k].toFixed(0)}}</td>` +
         `<td>${{S.p_ev[k].toFixed(0)}}</td><td>${{S.pv[k].toFixed(0)}}</td><td>${{(100*S.soc_bess[k]).toFixed(0)}}%</td></tr>`; }}).join('') +

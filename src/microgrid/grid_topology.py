@@ -162,3 +162,9 @@ def site_gpz(site: SiteConfig, data: PowerData) -> Substation:
                 return s
         raise KeyError(f"brak stacji {site.gpz!r} w danych OSM")
     return min(cands, key=lambda s: km((site.lat, site.lon), (s.lat, s.lon)))
+
+
+def nearest_district_gpz(lat: float, lon: float, data: PowerData) -> Substation:
+    """Najbliższy GPZ dzielnicowy (kind „gpz”, nazwa „GPZ …”) – np. dla przyłączenia farmy wiatrowej."""
+    cands = [s for s in data.substations if s.kind == "gpz" and s.name.startswith("GPZ ")]
+    return min(cands, key=lambda s: km((lat, lon), (s.lat, s.lon)))

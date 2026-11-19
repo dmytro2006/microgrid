@@ -251,7 +251,5 @@ KRAKOW_SITES_EXTRA: list[SiteConfig] = [
 ]
 ALL_SITES: list[SiteConfig] = KRAKOW_SITES + KRAKOW_SITES_EXTRA
 
-# Umowny punkt zasilania z sieci nadrzędnej (GPZ) – do wizualizacji na mapie.
-GRID_SUPPLY_POINT = {"name": "GPZ – sieć nadrzędna (umowny)", "lat": 50.0600, "lon": 19.9800}
 # wspólna farma wiatrowa poza miastem (lokalizacja umowna, otwarty teren na płn.-zach. od Krakowa)
 WIND_FARM_SITE = {"name": "Farma wiatrowa (poza miastem)", "lat": 50.1150, "lon": 19.8750}
