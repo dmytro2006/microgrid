@@ -6,6 +6,7 @@ Uruchomienie:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt_
 import io
 
@@ -13,12 +14,17 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-from microgrid.analysis import InvestmentCosts, best_contract, contract_sweep, monte_carlo, sizing_grid, summarize
+from microgrid.analysis import (InvestmentCosts, best_contract, contract_sweep, hosting_capacity_table, monte_carlo,
+                                sizing_grid, summarize)
+from microgrid import config as C
 from microgrid.animation import animated_map_html, flow_diagram_html, sankey_html, station_html
 from microgrid.config import ALL_SITES, SimConfig
 from microgrid.controller import CONTROLLERS
+from microgrid.cosim import run_all_network
+from microgrid.grid_osm import load_power_data
+from microgrid.grid_topology import site_gpz
 from microgrid.map_view import build_deck
-from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table, kpis
+from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table, kpis, network_summary
 from microgrid.plots import (plot_contract_sweep, plot_cost_breakdown, plot_grid_comparison, plot_kpi_bars,
                              plot_monte_carlo, plot_real_inputs, plot_sizing_heatmap, plot_timeseries)
 from microgrid.report import build_report
@@ -39,7 +45,28 @@ def show(fig) -> None:
 
 @st.cache_data(show_spinner="Symulacja w toku…")
 def simulate(sites_t: tuple, cfg: SimConfig):
-    return run_all(list(sites_t), cfg)
+    """Wyniki węzłów {(węzeł, strategia): Results} i – przy symulacji sieci – {strategia: NetworkResults}."""
+    if cfg.network:
+        return run_all_network(list(sites_t), cfg)
+    return run_all(list(sites_t), cfg), {}
+
+
+@st.cache_data(show_spinner=False)
+def gpz_of_sites() -> dict[str, str]:
+    """GPZ zasilający każdy węzeł (dane sieci WN z OSM); pusty słownik, gdy brak danych."""
+    data = load_power_data()
+    return {s.name: site_gpz(s, data).name for s in ALL_SITES} if data is not None else {}
+
+
+NET_ASSUMPTIONS = (
+    f"Sieć 110/15 kV (pandapower): topologia stacji i linii WN z OpenStreetMap (dane © współtwórcy OSM, ODbL), "
+    f"brakujące połączenia zastępcze ×{C.ROUTE_FACTOR:g} długości w linii prostej. Tło: "
+    f"{C.GPZ_BG_PEAK_KW / 1000:g} MW szczytu na GPZ, {C.FEEDER_BG_PEAK_KW / 1000:g} MW na linię 15 kV węzła, "
+    f"cos φ = {C.BG_COS_PHI:g}. Linie 110 kV: napowietrzne 243-AL1/39-ST1A, kable N2XS(FL)2Y 1×240; "
+    f"linie 15 kV: NA2XS2Y 1×240. GPZ 2 × 25 MVA 110/15 kV (vk 11%), transformator węzła 15/0,4 kV "
+    f"Sn = P_max/0,95 (vk 6%). EC Łęg {C.CHP_P_MIN_KW / 1000:g}–{C.CHP_P_MAX_KW / 1000:g} MW (zależnie od "
+    f"temperatury), ZTPO {C.ZTPO_KW / 1000:g} MW, napięcie w stacjach PSE {C.EXT_GRID_VM_PU:g} p.u. "
+    f"Granice: U 0,90–1,10 p.u., obciążenie ≤ 100%.")
 
 
 def main() -> None:
@@ -71,6 +98,16 @@ def main() -> None:
         ev_fc = st.toggle("MPC: prognoza przyjazdów EV", value=True,
                           help="Plan rezerwuje moc i energię dla aut, które statystycznie dopiero przyjadą.")
 
+        st.header("Sieć")
+        network = st.toggle("Sieć 110/15 kV (rozpływ mocy)", value=True, key="network",
+                            help="Wspólna symulacja węzłów w rzeczywistej sieci WN Krakowa (OSM) z rozpływem mocy "
+                                 "w każdym kroku: napięcia nN, obciążenia linii 15 kV, transformatorów i linii 110 kV.")
+        net_ctrl = st.toggle("Koordynator sieciowy", value=True, key="net_ctrl", disabled=not network,
+                             help="Węzeł naruszający ograniczenia sieci (U poza 0,90–1,10 p.u., obciążenie > 100%) "
+                                  "dostaje żądanie zmiany mocy PCC: BESS → EV → ograniczenie PV/wiatru.")
+        pv_mult = st.slider("Mnożnik PV", 1.0, 10.0, 1.0, step=0.5, key="pv_mult",
+                            help="Mnoży produkcję PV wszystkich węzłów – scenariusze nasycenia sieci fotowoltaiką.")
+
         st.header("Awaria sieci (GPZ)")
         outage = st.toggle("⚠️ Symuluj awarię / blackout", value=False,
                            help="Brak zasilania z GPZ – węzły pracują wyspowo (P_grid = 0). Deficyt: BESS → "
@@ -82,6 +119,13 @@ def main() -> None:
         out_ann = st.toggle("Awaria zapowiedziana (MPC zna ją z wyprzedzeniem)", value=False, disabled=not outage,
                             help="Np. planowane wyłączenie OSD. MPC (D) zawczasu ładuje BESS; pozostałe strategie "
                                  "nie korzystają z prognoz.")
+        site_gpzs = gpz_of_sites()
+        # węzły wybrane w sekcji „Lokalizacja” (widget niżej – wartość z poprzedniego przebiegu skryptu)
+        sel_sites = st.session_state.get("sites_chosen") or [s.name for s in ALL_SITES]
+        gpz_opts = sorted({site_gpzs[n] for n in sel_sites if n in site_gpzs})
+        out_gpz = st.multiselect("GPZ objęte awarią", gpz_opts, key="outage_gpz", disabled=not outage,
+                                 help="Puste = awaria wszystkich GPZ (blackout). Wybrane stacje: węzły pod nimi "
+                                      "pracują wyspowo, pozostałe normalnie; przy sieci rozpływ bez tych stacji.")
 
         st.header("Farma wiatrowa poza miastem")
         farm = st.radio("Wariant", ["none", "ppa", "gpz"], key="farm",
@@ -97,7 +141,7 @@ def main() -> None:
 
         st.header("Lokalizacja")
         all_names = [s.name for s in ALL_SITES]
-        chosen = st.multiselect("Węzły w symulacji", all_names, default=all_names,
+        chosen = st.multiselect("Węzły w symulacji", all_names, default=all_names, key="sites_chosen",
                                 help="9 węzłów w Krakowie; nowe – w miejscach skupisk ładowarek z OpenStreetMap.")
         names = chosen or all_names[:1]
         site_name = st.selectbox("Węzeł do edycji / analizy", names)
@@ -128,18 +172,23 @@ def main() -> None:
                     ev_fleet="real" if fleet else "synthetic", forecast=forecast, mpc_ev_forecast=ev_fc,
                     outage_start_h=float(out_start) if outage else None, outage_dur_h=float(out_dur),
                     outage_announced=bool(out_ann),
+                    outage_gpz=tuple(g for g in out_gpz if g in gpz_opts) if outage else (),
+                    pv_multiplier=float(pv_mult), network=bool(network), network_control=bool(net_ctrl),
                     wind_farm=farm, wind_farm_mw=float(farm_mw), wind_farm_hub_m=float(farm_hub),
                     start=f"{start:%Y-%m-%d} 00:00" if source == "real" else SimConfig.start)
     caption.caption(
         "Hybrydowa symulacja DES (SimPy) + krok bilansowy Δt. Dane wejściowe: " +
         ("**rzeczywiste** – pogoda Open-Meteo (ERA5/IFS), ceny RCE i zapotrzebowanie KSE z API PSE."
-         if source == "real" else "**syntetyczne**."))
+         if source == "real" else "**syntetyczne**.") +
+        (" Węzły w rzeczywistej sieci 110/15 kV Krakowa z rozpływem mocy (pandapower)"
+         f"{' i koordynatorem sieciowym' if net_ctrl else ''}." if network else "") +
+        (f" Mnożnik PV × {pv_mult:g}." if pv_mult != 1.0 else ""))
 
 
 
 
     try:
-        results = simulate(tuple(sites), cfg)
+        results, nets = simulate(tuple(sites), cfg)
     except ConnectionError as e:
         st.error(f"Nie udało się pobrać danych rzeczywistych ({e}). Przełącz na dane syntetyczne "
                  "albo wybierz datę, dla której dane są już w `data/cache`.")
@@ -219,6 +268,15 @@ def main() -> None:
             cols[1].metric("Farma: pokrycie poboru [%]", f"{k_now['Farma: pokrycie poboru [%]']:.1f}",
                            help="Część energii pobranej z sieci, zbilansowana w tym samym kroku produkcją farmy.")
             cols[2].metric("Farma PPA [PLN]", f"{k_now['Farma PPA [PLN]']:.0f}")
+        if cfg.network:
+            cols = st.columns(6)
+            for col, (m, fmt) in zip(cols, [("U min [p.u.]", "{:.3f}"), ("U max [p.u.]", "{:.3f}"),
+                                            ("Obc. linii SN max [%]", "{:.1f}"), ("Obc. transf. max [%]", "{:.1f}"),
+                                            ("Ograniczenie PV przez sieć [kWh]", "{:.1f}"),
+                                            ("Naruszenia sieci [kroki]", "{:.0f}")]):
+                col.metric(m, fmt.format(k_now[m]),
+                           help="Szyna nN węzła, linia 15 kV GPZ → węzeł, transformator 15/0,4 kV; ograniczenie "
+                                "PV i naruszenia – koordynator sieciowy (granice 0,90–1,10 p.u., ≤ 100%).")
         fig = plot_timeseries(r)
         show(fig)
         res = energy_balance_residuals(r)
@@ -233,7 +291,14 @@ def main() -> None:
         show(fig)
         fig = plot_kpi_bars(table)
         show(fig)
-        st.dataframe(table.style.format("{:.2f}"), width="stretch")
+        st.dataframe(table.dropna(axis=1, how="all").style.format("{:.2f}"), width="stretch")
+        if nets:
+            st.subheader("Sieć 110/15 kV – podsumowanie strategii")
+            st.dataframe(pd.DataFrame({CONTROLLERS[s].label: network_summary(nr, cfg.dt_h) for s, nr in nets.items()})
+                         .T.style.format("{:.2f}"), width="stretch")
+            st.caption("Obciążenie linii 110 kV, straty w sieci 110/15 kV, wymiana wewnętrzna (energia oddana przez "
+                       "jedne węzły i pobrana przez inne w tym samym kroku), szczytowy pobór z sieci PSE i produkcja "
+                       "EC Łęg w horyzoncie. Kroki bez rozpływu (blackout) pominięte.")
 
     # ---------------- Mapa ----------------
     with tab_map:
@@ -243,6 +308,7 @@ def main() -> None:
                                     format_func=lambda k: CONTROLLERS[k].label, key="map_strategy")
             animated = st.toggle("Animacja (cząstki energii)", value=True)
         rs = [results[(s.name, map_strategy)] for s in sites]
+        nr = nets.get(map_strategy)
         times = rs[0].ts["time"]
         k_peak = int(sum(x.ts["p_grid"].abs() for x in rs).idxmax())
         if not rs[0].ts["grid_ok"].all():  # awaria → start od jej początku
@@ -251,7 +317,7 @@ def main() -> None:
             with c2:
                 st.markdown("Cząstki płyną od źródła do odbiorcy; ich prędkość i liczba ∝ moc. "
                             "Kolor PCC: 🟢 niskie → 🔴 przeciążenie (|P_grid| / P_max). Start: chwila szczytu.")
-            st.iframe(animated_map_html(rs, start_k=k_peak, autoplay=False, height=880), height=900)
+            st.iframe(animated_map_html(rs, start_k=k_peak, autoplay=False, height=880, nr=nr), height=900)
             k = k_peak
             st.caption(f"Tabela: stan w chwili szczytu {times.iloc[k]:%d.%m %H:%M}")
         else:
@@ -260,7 +326,7 @@ def main() -> None:
                               help="Domyślnie: chwila największego łącznego poboru z sieci")
                 st.markdown(f"**{times.iloc[k]:%d.%m.%Y %H:%M}** – grubość łuku ∝ moc, kolor węzła PCC: "
                             "🟢 niskie → 🔴 przeciążenie (|P_grid| / P_max)")
-            st.pydeck_chart(build_deck(rs, k), height=850)
+            st.pydeck_chart(build_deck(rs, k, nr=nr), height=850)
             st.caption(f"Tabela: stan w chwili {times.iloc[k]:%d.%m %H:%M}")
         snap = pd.DataFrame([{
             "Lokalizacja": x.site.name, "P_grid [kW]": x.ts["p_grid"].iloc[k], "P_max [kW]": x.site.p_max_kw,
@@ -269,6 +335,8 @@ def main() -> None:
             "SoC BESS [%]": 100 * x.ts["soc_bess"].iloc[k],
         } for x in rs]).set_index("Lokalizacja")
         st.dataframe(snap.style.format("{:.1f}"), width="stretch")
+        if nr is not None:
+            st.caption(NET_ASSUMPTIONS)
 
     # ---------------- Dane wejściowe ----------------
     with tab_in:
@@ -362,6 +430,25 @@ def main() -> None:
             best = best_contract(ct, udr_pen)[["P_umowna [kW]", "Koszt całk. [PLN]", "UDR wykonalne [%]",
                                                "Opł. stała [PLN]", "Kara moc umowna [PLN]"]]
             st.dataframe(best.style.format("{:.1f}"), width="stretch")
+
+        st.divider()
+        st.subheader("Zdolność przyłączeniowa PV")
+        st.caption("Największa moc PV węzła, przy której sieć 110/15 kV nie jest przeciążona (napięcie nN ≤ 1,10 p.u., "
+                   "linia 15 kV i transformator ≤ 100%). Bisekcja po mocy PV, 1 doba od daty startu, Δt = 15 min, "
+                   "bez koordynatora, awarii i mnożnika PV; liczą się tylko naruszenia, których nie ma przy PV = 0. "
+                   "Ok. 10–20 symulacji na węzeł.")
+        c1, c2 = st.columns(2)
+        hc_strat = c1.selectbox("Strategia ", list(CONTROLLERS), index=0, key="hc_strategy",
+                                format_func=lambda k: CONTROLLERS[k].label)
+        hc_max = c2.select_slider("Szukaj do [kWp]", options=[1000, 2000, 5000, 10000], value=5000, key="hc_max")
+        if st.button("▶ Wyznacz zdolność przyłączeniową", key="hc_run"):
+            with st.spinner(f"Zdolność przyłączeniowa PV {len(sites)} węzłów…"):
+                st.session_state["hosting"] = hosting_capacity_table(
+                    sites, dataclasses.replace(cfg, pv_multiplier=1.0, outage_gpz=()), hc_strat, float(hc_max))
+        if "hosting" in st.session_state:
+            st.dataframe(st.session_state["hosting"].style.format({"PV obecnie [kWp]": "{:.0f}",
+                                                                   "Zdolność PV [kWp]": "{:.0f}"}),
+                         width="stretch")
 
         st.divider()
         st.subheader("Parametry taryfy (orientacyjne)")

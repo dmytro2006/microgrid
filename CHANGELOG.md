@@ -2,6 +2,85 @@
 
 Wszystkie zmiany na gałęzi `feature/real-data-animations` względem `master` (`092cb05 Initial commit`).
 
+## [0.7.0] – 2026-11-19 · rzeczywista sieć 110/15 kV Krakowa z rozpływem mocy
+
+### Dodane
+- **Sieć WN z OpenStreetMap** (`grid_osm.py`, cache `data/cache/osm_power_krakow.json` w repo – praca offline):
+  stacje 110/220/400 kV i linie/kable WN w prostokącie 49,95–50,17 N, 19,70–20,32 E. Dane © współtwórcy OSM (ODbL).
+- **Topologia** (`grid_topology.py`): odcinki OSM sklejone w linie między stacjami; stacje bez połączenia
+  w danych dostają połączenie zastępcze (odległość × 1,3), oznaczone na mapie. Każdy węzeł ma swój GPZ
+  (najbliższy GPZ dzielnicowy albo `SiteConfig.gpz`).
+- **Model pandapower** (`network.py`): szyny 110 kV, stacje PSE (Skawina, Wanda, Lubocza) jako sieć krajowa,
+  GPZ 2 × 25 MVA 110/15 kV, linia kablowa 15 kV do każdego węzła i transformator 15/0,4 kV węzła.
+  Źródła na 110 kV: **EC Łęg** (60–380 MW zależnie od średniej temperatury dobowej) i **ZTPO** (7,5 MW).
+- **Wspólna symulacja węzłów** (`cosim.py`, `SimConfig.network`, `run_all_network`). Jeden przebieg na strategię
+  obejmuje wszystkie węzły. W każdym kroku: decyzje EMS → rozpływ mocy → **koordynator sieciowy**
+  (`network_control`) → zapis. Koordynator koryguje węzeł z naruszeniem (U poza 0,90–1,10 p.u., linia 15 kV
+  lub transformator > 100%): przy eksporcie BESS → EV → ograniczenie PV/wiatru, przy poborze BESS → dławienie EV.
+  Naruszenia na 110 kV są tylko raportowane.
+- **Mnożnik PV** (`SimConfig.pv_multiplier`) i **awaria wybranych GPZ** (`SimConfig.outage_gpz`): węzły pod
+  wyłączonym GPZ pracują wyspowo, pozostałe normalnie, rozpływ bez wyłączonej stacji.
+- KPI węzła: `U min/max [p.u.]`, `Obc. linii SN max [%]`, `Obc. transf. max [%]`,
+  `Ograniczenie PV przez sieć [kWh]`, `Naruszenia sieci [kroki]`. KPI sieci (`network_summary`):
+  `Obc. linii 110 kV max [%]`, `Straty sieci [MWh]`, `Wymiana wewnętrzna [kWh]`, `Pobór z PSE max [MW]`,
+  `Produkcja EC Łęg [MWh]`.
+- **Zdolność przyłączeniowa PV** (`analysis.hosting_capacity`, `hosting_capacity_table`): bisekcja po mocy PV
+  węzła (1 doba, Δt = 15 min, bez koordynatora); liczą się tylko naruszenia, których nie ma przy PV = 0.
+- **Mapy**: linie 110/220/400 kV i stacje z OSM, linie 15 kV węzeł–GPZ, kolor linii wg obciążenia,
+  kolor węzła wg napięcia; zamiast umownego punktu zasilania – przepływ do własnego GPZ.
+- **Panel**: sekcja „Sieć” (przełącznik „Sieć 110/15 kV (rozpływ mocy)” – domyślnie włączony, „Koordynator
+  sieciowy”, „Mnożnik PV” 1–10), multiselect „GPZ objęte awarią”, metryki sieci węzła w 📈, tabela sieci
+  na strategię w 📊, „Zdolność przyłączeniowa PV” w 🔬, założenia modelu pod mapą.
+- **CLI**: `--network`, `--no-net-control`, `--pv-mult`; KPI sieci w `out/siec_<strategia>.csv`.
+- Zależność `pandapower>=3.5` (pandas 2.3.x, numpy < 2.5).
+
+### Założenia (stałe w `config.py`, wypisane w panelu)
+- Tło: 20 MW szczytu na GPZ dzielnicowy, 2 MW na linię 15 kV węzła, cos φ = 0,95; kształt KSE (dane
+  rzeczywiste) lub profil syntetyczny.
+- Linie 110 kV: `243-AL1/39-ST1A 110.0` (napowietrzne), `N2XS(FL)2Y 1x240 RM/35 64/110 kV` (kable);
+  linia 15 kV: `NA2XS2Y 1x240 RM/25 12/20 kV`, długość = odległość × 1,3.
+- Transformator węzła Sn = P_max / 0,95, vk = 6%; napięcie w stacjach PSE 1,05 p.u.
+- EC Łęg maks. 380 MW (ok. 80% z 480 MWe), min. 60 MW latem; ZTPO 7,5 MW stale.
+
+### Wyniki (9 węzłów, 2 doby, dane rzeczywiste, flota rzeczywista, Δt = 5 min, seed 42)
+
+| | lato (od 15.06) | zima (od 12.01) |
+|---|---:|---:|
+| obciążenie linii 110 kV maks. (A / D) | 113,3% / 113,1% | 96,7% / 96,7% |
+| straty w sieci 110/15 kV | 299,6 MWh | 242,8 MWh |
+| pobór z PSE maks. | 675 MW | 486 MW |
+| produkcja EC Łęg | 3 050 MWh | 12 360 MWh |
+| napięcie nN węzłów | 0,975–1,029 p.u. | 0,976–1,029 p.u. |
+| obciążenie transformatora węzła maks. (D) | 91,8–94,5% | 92,6–95,4% |
+| obciążenie linii 15 kV węzła maks. | 20–24% | 20–24% |
+| naruszenia sieci przy obecnym PV | 0 | 0 |
+
+- Mikrosieci są niewidoczne na 110 kV (różnice między strategiami < 0,4 p.p. obciążenia, < 0,1 MWh strat).
+  Przeciążenie jednej linii 110 kV latem (ok. 113%) wynika z tła i małej produkcji EC Łęg – zimą EC pokrywa
+  większą część zapotrzebowania i maksimum spada poniżej 100%.
+- **Zdolność przyłączeniowa PV** (strategia A, dzień startu; we wszystkich węzłach pierwszym ograniczeniem jest
+  transformator węzła, nie linia 15 kV ani napięcie):
+
+| węzeł (GPZ) | PV obecnie [kWp] | lato [kWp] | zima [kWp] |
+|---|---:|---:|---:|
+| AGH / Czarna Wieś (GPZ AGH) | 150 | 684 | 1 582 |
+| Nowa Huta – os. Centrum (GPZ Czyżyny) | 80 | 430 | 1 055 |
+| Kazimierz (GPZ Dajwór) | 100 | 820 | 1 855 |
+| Bonarka / Podgórze (GPZ Bonarka) | 300 | 1 680 | 3 652 |
+| Ruczaj / Kampus UJ (GPZ Kampus) | 200 | 977 | 2 129 |
+| Dworzec Główny (GPZ Centrum Komunikacyjne) | 60 | 664 | 1 523 |
+| Czyżyny (GPZ Wieczysta) | 60 | 313 | 762 |
+| Bieżanów-Prokocim (GPZ Bieżanów) | 90 | 566 | 1 250 |
+| Prądnik Biały (GPZ Górka) | 50 | 313 | 781 |
+
+  Obecne PV to 9–22% zdolności latem; zimą (niskie nasłonecznienie) zmieści się ok. 2,2–2,5× więcej.
+- **PV × 5, lato**: bez koordynatora strategia A narusza ograniczenia w 112 krokach (transformator węzła do 140%
+  w Prądniku Białym, 126% w AGH); koordynator usuwa wszystkie naruszenia, ograniczając PV tylko o 32 kWh
+  (AGH) – resztę przejmuje ładowanie EV. MPC (D) z BESS mieści się w sieci bez korekt (maks. 97,7%).
+  Wymiana wewnętrzna między węzłami rośnie z ~0 do 1,3 MWh (A) / 2,0 MWh (D).
+- Pierwsze ładowanie panelu z siecią (9 węzłów × 4 strategie × 2 doby, Δt = 5 min, 16 rdzeni): **60 s**
+  (bez sieci ok. 10 s); zdolność przyłączeniowa 9 węzłów: ok. 40 s.
+
 ## [0.6.0] – 2026-11-19 · wspólna farma wiatrowa poza miastem
 
 ### Dodane

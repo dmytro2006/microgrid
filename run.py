@@ -3,6 +3,7 @@
 Przykład:
     uv run python run.py --days 2 --dt 5 --no-show
     uv run python run.py --data real --start 2026-01-12 --days 7 --fleet real --no-show
+    uv run python run.py --network --pv-mult 5 --no-show   # sieć 110/15 kV z rozpływem mocy
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ def main() -> None:
     ap.add_argument("--strategies", default="ABCD", help="podzbiór strategii, np. ABC")
     ap.add_argument("--report", action="store_true", help="zapisz raport HTML (raport.html)")
     ap.add_argument("--no-ev-forecast", action="store_true", help="MPC bez prognozy przyjazdów EV")
+    ap.add_argument("--network", action="store_true",
+                    help="wspólna symulacja węzłów w sieci 110/15 kV z rozpływem mocy (pandapower)")
+    ap.add_argument("--no-net-control", action="store_true", help="sieć bez koordynatora sieciowego")
+    ap.add_argument("--pv-mult", type=float, default=1.0, help="mnożnik produkcji PV wszystkich węzłów")
     ap.add_argument("--sites", nargs="*", help="podciągi nazw lokalizacji (domyślnie wszystkie)")
     ap.add_argument("--out", default="out")
     ap.add_argument("--dpi", type=int, default=200, help="rozdzielczość plików PNG")
@@ -49,7 +54,7 @@ def main() -> None:
 
     from microgrid.config import ALL_SITES, SimConfig
     from microgrid.map_view import build_deck
-    from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table
+    from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table, network_summary
     from microgrid.plots import plot_grid_comparison, plot_kpi_bars, plot_timeseries
     from microgrid.simulation import run_all
 
@@ -58,19 +63,36 @@ def main() -> None:
         sites = [s for s in sites if any(q.lower() in s.name.lower() for q in args.sites)]
     cfg = SimConfig(days=args.days, dt_min=args.dt, seed=args.seed, start=f"{args.start} 00:00",
                     data_source=args.data, ev_fleet=args.fleet, forecast=args.forecast,
-                    mpc_ev_forecast=not args.no_ev_forecast)
+                    mpc_ev_forecast=not args.no_ev_forecast, network=args.network,
+                    network_control=not args.no_net_control, pv_multiplier=args.pv_mult)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     print(f"Symulacja: {len(sites)} lokalizacji × {len(args.strategies)} scenariusze, {cfg.days} dni od {args.start}, "
-          f"Δt = {cfg.dt_min} min, seed = {cfg.seed}, dane = {cfg.data_source}, flota = {cfg.ev_fleet}")
-    results = run_all(sites, cfg, strategies=tuple(args.strategies.upper()))
+          f"Δt = {cfg.dt_min} min, seed = {cfg.seed}, dane = {cfg.data_source}, flota = {cfg.ev_fleet}"
+          + (f", sieć 110/15 kV{' + koordynator' if cfg.network_control else ''}" if cfg.network else "")
+          + (f", mnożnik PV = {cfg.pv_multiplier:g}" if cfg.pv_multiplier != 1.0 else ""))
+    nets = {}
+    if cfg.network:
+        from microgrid.cosim import run_all_network
+        results, nets = run_all_network(sites, cfg, strategies=tuple(args.strategies.upper()))
+    else:
+        results = run_all(sites, cfg, strategies=tuple(args.strategies.upper()))
 
     table = kpi_table(results)
     with pd.option_context("display.width", 250, "display.max_columns", 30, "display.float_format", "{:.2f}".format):
         print("\n=== KPI ===")
         print(table)
     table.to_csv(out / "kpi.csv")
+    if nets:
+        net_table = pd.DataFrame({s: network_summary(nr, cfg.dt_h) for s, nr in nets.items()}).T
+        net_table.index.name = "Scenariusz"
+        with pd.option_context("display.width", 250, "display.max_columns", 10,
+                               "display.float_format", "{:.2f}".format):
+            print("\n=== Sieć 110/15 kV ===")
+            print(net_table)
+        for s in nets:
+            net_table.loc[[s]].to_csv(out / f"siec_{s}.csv")
 
     worst = max(abs(v) for r in results.values() for v in energy_balance_residuals(r).values())
     print(f"\nWalidacja bilansu energii: max |rezyduum| = {worst:.2e} kWh")
@@ -106,14 +128,15 @@ def main() -> None:
         rs = [results[(s.name, strategy)] for s in sites]
         total = sum(r.ts["p_grid"].abs() for r in rs)
         k = int(total.idxmax())
-        build_deck(rs, k).to_html(str(out / f"map_{strategy}.html"), open_browser=False, notebook_display=False)
+        build_deck(rs, k, nr=nets.get(strategy)).to_html(str(out / f"map_{strategy}.html"), open_browser=False, notebook_display=False)
         if strategy == map_strats[0]:
             k_peak = k
     if args.anim:
         from microgrid.animation import animated_map_html, flow_diagram_html, sankey_html, station_html
         for strategy in dict.fromkeys(map_strats):
             rs = [results[(s.name, strategy)] for s in sites]
-            (out / f"anim_map_{strategy}.html").write_text(animated_map_html(rs, start_k=k_peak), encoding="utf-8")
+            html = animated_map_html(rs, start_k=k_peak, nr=nets.get(strategy))
+            (out / f"anim_map_{strategy}.html").write_text(html, encoding="utf-8")
             for r in rs:
                 (out / f"anim_{slug(r.site.name)}_{strategy}.html").write_text(flow_diagram_html(r), encoding="utf-8")
                 (out / f"sankey_{slug(r.site.name)}_{strategy}.html").write_text(sankey_html(r), encoding="utf-8")

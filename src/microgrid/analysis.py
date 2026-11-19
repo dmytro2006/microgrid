@@ -169,3 +169,21 @@ def hosting_capacity(site: SiteConfig, cfg: SimConfig, strategy: str = "A", pv_m
         else:
             lo = mid
     return {"kWp": lo, "ograniczenie": _pierwsze_ograniczenie(ts_hi)}
+
+
+def _hosting_task(args) -> dict:
+    site, cfg, strategy, pv_max_kwp = args
+    return hosting_capacity(site, cfg, strategy, pv_max_kwp=pv_max_kwp)
+
+
+def hosting_capacity_table(sites: list[SiteConfig], cfg: SimConfig, strategy: str = "A",
+                           pv_max_kwp: float = 5000.0, n_jobs: int | None = None) -> pd.DataFrame:
+    """``hosting_capacity`` dla wielu węzłów (równolegle) → tabela: węzeł, GPZ, PV obecnie, zdolność, ograniczenie."""
+    from .grid_osm import load_power_data
+    from .grid_topology import site_gpz
+    data = load_power_data()
+    out = parallel_map(_hosting_task, [(s, cfg, strategy, pv_max_kwp) for s in sites], n_jobs)
+    return pd.DataFrame([{
+        "Węzeł": s.name, "GPZ": site_gpz(s, data).name if data is not None else "",
+        "PV obecnie [kWp]": s.pv_kwp, "Zdolność PV [kWp]": o["kWp"], "Ograniczenie": o["ograniczenie"],
+    } for s, o in zip(sites, out)]).set_index("Węzeł")

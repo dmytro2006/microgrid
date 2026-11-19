@@ -15,6 +15,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .osm import ENDPOINTS
 from .real_data import USER_AGENT, data_dir
@@ -133,10 +134,17 @@ def fetch_power(retries_per_endpoint: int = 2, timeout: float = 120.0) -> dict:
             "lines": _overpass(q_lin, retries_per_endpoint, timeout)}
 
 
+@lru_cache(maxsize=4)
+def _parse_cache_file(path: str, mtime_ns: int) -> PowerData:
+    """Parsowanie pliku cache raz na wersję pliku (``PowerData`` jest niemutowalne – można je współdzielić)."""
+    with open(path, encoding="utf-8") as f:
+        return parse_power(json.load(f))
+
+
 def load_power_data(fetch_if_missing: bool = False) -> PowerData | None:
     path = data_dir() / POWER_CACHE
     if path.exists():
-        return parse_power(json.loads(path.read_text(encoding="utf-8")))
+        return _parse_cache_file(str(path), path.stat().st_mtime_ns)
     if not fetch_if_missing:
         return None
     try:
