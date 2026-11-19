@@ -134,6 +134,7 @@ class NetworkSim:
         self.sims = {s.name: SiteSim(self.env, s, strategy, cfg) for s in sites}
         self.model = GridModel(sites, data, farm=cfg.wind_farm != "none")
         self.bg = background_shape(cfg)
+        self.outage = ~cfg.grid_available()  # kroki awarii (pełnej lub wybranych GPZ)
         self.chp = chp_profile(cfg)
         self.ztpo = ztpo_profile(cfg)
         if cfg.wind_farm != "none":
@@ -161,9 +162,10 @@ class NetworkSim:
         out_nodes = [name for name, p in props.items() if not p.grid_ok]
         res: StepResult | None = None
         if len(out_nodes) < len(props):  # pełny blackout → rozpływ pominięty
-            gpz_out = frozenset(cfg.outage_gpz) | {model.site_gpz[n] for n in out_nodes} if out_nodes \
-                else frozenset()
-            res = self._solve(k, props, frozenset(gpz_out))
+            # awaria wybranych GPZ wg maski czasu (także GPZ bez symulowanego węzła) + GPZ węzłów wyspowych
+            gpz_out = frozenset(cfg.outage_gpz) if cfg.outage_gpz and self.outage[k] else frozenset()
+            gpz_out |= {model.site_gpz[n] for n in out_nodes}
+            res = self._solve(k, props, gpz_out)
             if cfg.network_control and res.pf_ok:
                 for _ in range(MAX_COORD_ITER):
                     corr = coordinate(props, res, model)
@@ -171,7 +173,7 @@ class NetworkSim:
                         break
                     for name, d in corr.items():
                         apply_correction(props[name], d)
-                    res = self._solve(k, props, frozenset(gpz_out))
+                    res = self._solve(k, props, gpz_out)
                     if not res.pf_ok:
                         break
             self.pf_ok[k] = res.pf_ok

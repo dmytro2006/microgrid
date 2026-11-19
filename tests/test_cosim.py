@@ -104,3 +104,13 @@ def test_internal_exchange_nonnegative(all_c):
     assert (x >= 0).all()
     assert (x <= np.minimum(exp, imp) + 1e-9).all()
     assert np.allclose(x, np.minimum(exp, imp))
+
+
+def test_outage_of_gpz_without_node():
+    cfg = dataclasses.replace(CFG, outage_start_h=10.0, outage_dur_h=4.0, outage_gpz=("GPZ Politechnika",))
+    res, net = run_network([AGH], "C", cfg)
+    out = ~cfg.grid_available()
+    g = net.gpz_loading["GPZ Politechnika"]
+    assert ((g[out] == 0) | g[out].isna()).all()
+    assert (g[~out] > 0).all()
+    assert net.pf_ok.all() and res[AGH.name].ts["grid_ok"].all()
