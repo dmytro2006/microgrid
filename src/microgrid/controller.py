@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import SiteConfig
 from .ev_generator import EV
@@ -24,6 +24,12 @@ class SiteState:
     bess: BESS
     site: SiteConfig
     v2g_soc_floor: float
+    # dane dla strategii predykcyjnych (D): indeks kroku, prognozy na całym horyzoncie, taryfa
+    k: int = 0
+    dt_min: int = 5
+    forecast: dict = field(default_factory=dict)
+    tariff: object = None
+    p_grid_prev: float = 0.0
 
     @property
     def p_net(self) -> float:
@@ -61,7 +67,7 @@ class PeakShavingController(Controller):
     valley = 0.50  # doładowanie BESS z sieci w dolinie obciążenia
 
     def decide(self, s: SiteState) -> Decision:
-        p_max = s.site.p_max_kw
+        p_max = s.site.p_limit_kw
         p_ev = {ev.id: ev.max_charge_kw(s.dt_h) for ev in s.active}
         ev_sum = sum(p_ev.values())
         p_pred = s.p_net + ev_sum
@@ -92,7 +98,7 @@ class SmartController(Controller):
 
     def decide(self, s: SiteState) -> Decision:
         dt_h = s.dt_h
-        p_lim = self.safety * s.site.p_max_kw
+        p_lim = self.safety * s.site.p_limit_kw
         p_net = s.p_net
         cheap = s.price_signal <= s.price_low
         expensive = s.price_signal >= s.price_high
@@ -138,3 +144,8 @@ CONTROLLERS: dict[str, type[Controller]] = {
     "B": PeakShavingController,
     "C": SmartController,
 }
+
+
+from .mpc import MPCController  # noqa: E402  (rejestracja strategii D; import po definicjach – brak cyklu)
+
+CONTROLLERS["D"] = MPCController

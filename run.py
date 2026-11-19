@@ -2,6 +2,7 @@
 
 Przykład:
     uv run python run.py --days 2 --dt 5 --no-show
+    uv run python run.py --data real --start 2026-01-12 --days 7 --fleet real --no-show
 """
 
 from __future__ import annotations
@@ -20,10 +21,20 @@ def slug(s: str) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Symulacja mikrosieci EV + BESS + OZE (dane syntetyczne)")
+    ap = argparse.ArgumentParser(description="Symulacja mikrosieci EV + BESS + OZE (dane syntetyczne lub rzeczywiste)")
     ap.add_argument("--days", type=int, default=2)
     ap.add_argument("--dt", type=int, default=5, choices=[1, 5, 15], help="krok Δt [min]")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--data", default="synthetic", choices=["synthetic", "real"],
+                    help="profile wejściowe: syntetyczne albo Open-Meteo + PSE (RCE, KSE)")
+    ap.add_argument("--start", default="2026-06-15", help="data startu (RRRR-MM-DD, czas lokalny)")
+    ap.add_argument("--fleet", default="synthetic", choices=["synthetic", "real"],
+                    help="flota EV: syntetyczna albo rzeczywiste modele + ładowarki AC/DC")
+    ap.add_argument("--anim", action="store_true", help="zapisz animacje HTML (mapa + schemat węzła)")
+    ap.add_argument("--forecast", default="perfect", choices=["perfect", "persistence"], help="prognoza dla MPC (D)")
+    ap.add_argument("--strategies", default="ABCD", help="podzbiór strategii, np. ABC")
+    ap.add_argument("--report", action="store_true", help="zapisz raport HTML (raport.html)")
+    ap.add_argument("--no-ev-forecast", action="store_true", help="MPC bez prognozy przyjazdów EV")
     ap.add_argument("--sites", nargs="*", help="podciągi nazw lokalizacji (domyślnie wszystkie)")
     ap.add_argument("--out", default="out")
     ap.add_argument("--dpi", type=int, default=200, help="rozdzielczość plików PNG")
@@ -36,21 +47,24 @@ def main() -> None:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from microgrid.config import KRAKOW_SITES, SimConfig
+    from microgrid.config import ALL_SITES, SimConfig
     from microgrid.map_view import build_deck
     from microgrid.metrics_evaluator import energy_balance_residuals, kpi_table
     from microgrid.plots import plot_grid_comparison, plot_kpi_bars, plot_timeseries
     from microgrid.simulation import run_all
 
-    sites = KRAKOW_SITES
+    sites = ALL_SITES
     if args.sites:
         sites = [s for s in sites if any(q.lower() in s.name.lower() for q in args.sites)]
-    cfg = SimConfig(days=args.days, dt_min=args.dt, seed=args.seed)
+    cfg = SimConfig(days=args.days, dt_min=args.dt, seed=args.seed, start=f"{args.start} 00:00",
+                    data_source=args.data, ev_fleet=args.fleet, forecast=args.forecast,
+                    mpc_ev_forecast=not args.no_ev_forecast)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f"Symulacja: {len(sites)} lokalizacji × 3 scenariusze, {cfg.days} dni, Δt = {cfg.dt_min} min, seed = {cfg.seed}")
-    results = run_all(sites, cfg)
+    print(f"Symulacja: {len(sites)} lokalizacji × {len(args.strategies)} scenariusze, {cfg.days} dni od {args.start}, "
+          f"Δt = {cfg.dt_min} min, seed = {cfg.seed}, dane = {cfg.data_source}, flota = {cfg.ev_fleet}")
+    results = run_all(sites, cfg, strategies=tuple(args.strategies.upper()))
 
     table = kpi_table(results)
     with pd.option_context("display.width", 250, "display.max_columns", 30, "display.float_format", "{:.2f}".format):
@@ -74,17 +88,50 @@ def main() -> None:
             plt.close(fig)
     fig = plot_kpi_bars(table)
     fig.savefig(out / f"kpi.{args.format}", dpi=args.dpi, bbox_inches="tight")
+    if "Koszt całk. [PLN]" in table:
+        from microgrid.plots import plot_cost_breakdown
+        for s in sites:
+            fig = plot_cost_breakdown(table, s.name)
+            fig.savefig(out / f"koszty_{slug(s.name)}.{args.format}", dpi=args.dpi, bbox_inches="tight")
+            if args.no_show:
+                plt.close(fig)
+    if args.report:
+        from microgrid.report import build_report
+        (out / "raport.html").write_text(build_report(results, table), encoding="utf-8")
+        print(f"Raport: {out}/raport.html")
 
     # mapa: chwila maksymalnego obciążenia (scenariusz A, suma po lokalizacjach)
-    for strategy in ("A", "C"):
+    map_strats = [st for st in ("A", args.strategies.upper()[-1]) if (sites[0].name, st) in results]
+    for strategy in dict.fromkeys(map_strats):
         rs = [results[(s.name, strategy)] for s in sites]
         total = sum(r.ts["p_grid"].abs() for r in rs)
         k = int(total.idxmax())
         build_deck(rs, k).to_html(str(out / f"map_{strategy}.html"), open_browser=False, notebook_display=False)
-        if strategy == "A":
+        if strategy == map_strats[0]:
             k_peak = k
-    t_peak = results[(sites[0].name, "A")].ts["time"].iloc[k_peak]
-    print(f"Mapy przepływów: {out}/map_A.html (szczyt {t_peak:%d.%m %H:%M}), {out}/map_C.html")
+    if args.anim:
+        from microgrid.animation import animated_map_html, flow_diagram_html, sankey_html, station_html
+        for strategy in dict.fromkeys(map_strats):
+            rs = [results[(s.name, strategy)] for s in sites]
+            (out / f"anim_map_{strategy}.html").write_text(animated_map_html(rs, start_k=k_peak), encoding="utf-8")
+            for r in rs:
+                (out / f"anim_{slug(r.site.name)}_{strategy}.html").write_text(flow_diagram_html(r), encoding="utf-8")
+                (out / f"sankey_{slug(r.site.name)}_{strategy}.html").write_text(sankey_html(r), encoding="utf-8")
+        strats = list(dict.fromkeys(map_strats))
+        for s in sites:
+            rr = [results[(s.name, st)] for st in strats]
+            (out / f"parking_{slug(s.name)}.html").write_text(station_html(rr), encoding="utf-8")
+        print(f"Animacje: {out}/anim_*.html")
+    if cfg.data_source == "real":
+        from microgrid.plots import plot_real_inputs
+        for s in sites:
+            fig = plot_real_inputs(results[(s.name, "A")])
+            fig.savefig(out / f"inputs_{slug(s.name)}.{args.format}", dpi=args.dpi, bbox_inches="tight")
+            if args.no_show:
+                plt.close(fig)
+    t_peak = results[(sites[0].name, map_strats[0])].ts["time"].iloc[k_peak]
+    print(f"Mapy przepływów: " + ", ".join(f"{out}/map_{st}.html" for st in dict.fromkeys(map_strats))
+          + f" (szczyt {t_peak:%d.%m %H:%M})")
     print(f"Wyniki zapisane w: {out.resolve()}")
 
     if not args.no_show:

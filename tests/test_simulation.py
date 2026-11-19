@@ -29,7 +29,7 @@ def test_bess_soc_within_limits(results):
 def test_baseline_overloads_and_controlled_scenarios_do_not(results):
     assert any(kpis(results[(s.name, "A")])["T_over [min/doba]"] > 0 for s in KRAKOW_SITES)
     for s in KRAKOW_SITES:
-        for st in ("B", "C"):
+        for st in ("B", "C", "D"):
             assert kpis(results[(s.name, st)])["T_over [min/doba]"] == 0, (s.name, st)
 
 
@@ -60,7 +60,28 @@ def test_other_time_steps(dt):
     assert max(abs(v) for v in energy_balance_residuals(r).values()) < 1e-6
 
 
+@pytest.mark.parametrize("forecast", ["perfect", "persistence"])
+def test_mpc_forecast_modes(forecast):
+    r = run(KRAKOW_SITES[2], "D", SimConfig(days=2, dt_min=15, forecast=forecast))
+    assert kpis(r)["T_over [min/doba]"] == 0
+    assert max(abs(v) for v in energy_balance_residuals(r).values()) < 1e-6
+
+
 def test_map_builds(results):
     rs = [results[(s.name, "A")] for s in KRAKOW_SITES]
     deck = build_deck(rs, 100)
-    assert len(deck.layers) == 3
+    assert len(deck.layers) >= 3
+
+
+def test_mpc_beats_rule_based_on_total_cost(results):
+    for s in KRAKOW_SITES:
+        cost = {st: kpis(results[(s.name, st)])["Koszt całk. [PLN]"] for st in "ABCD"}
+        assert cost["D"] < cost["C"] < cost["A"], (s.name, cost)
+
+
+def test_tariff_penalises_overrun(results):
+    for s in KRAKOW_SITES:
+        a = kpis(results[(s.name, "A")])
+        if a["T_over [min/doba]"] > 0:
+            assert a["Kara moc umowna [PLN]"] > 0
+        assert kpis(results[(s.name, "D")])["Kara moc umowna [PLN]"] == 0

@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 
 from .simulation import Results
+from .aging import AgingParams, aging_kpis
+from .tariff import DEFAULT_TARIFF, cost_breakdown
 
 
 def kpis(r: Results) -> dict[str, float]:
@@ -20,7 +22,18 @@ def kpis(r: Results) -> dict[str, float]:
     done = ses[ses["status"] == "served"]
     unmet = (done["soc_final"] < done["soc_target"] - 1e-3)
     served = ses[ses["status"].isin(["served", "end_of_sim"])]
+    # UDR wykonalne: tylko pojazdy, które fizycznie dało się naładować do celu w czasie postoju
+    park_h = (done["t_dep"] - done["t_arr"]).dt.total_seconds() / 3600 - done["wait_min"].fillna(0) / 60
+    feasible = done["p_max_kw"] * park_h >= (done["soc_target"] - done["soc_init"]) * done["cap_kwh"] - 1e-6
 
+    costs = cost_breakdown(ts, r.cfg.dt_min, r.cfg.days, r.site.p_contract, r.site.bess_kwh, DEFAULT_TARIFF)
+    efc = (ts["p_bess"].abs().sum() * dt_h) / (2 * r.site.bess_kwh) if r.site.bess_kwh else 0.0
+    t = DEFAULT_TARIFF
+    aging = aging_kpis(ts["soc_bess"].to_numpy(), ts["t_amb"].to_numpy(), dt_h, r.site.bess_kwh,
+                       t.bess_capex_pln_kwh, AgingParams(cycle_life_ref=t.bess_cycle_life, dod_ref=t.bess_dod))
+    # koszt zużycia BESS z modelu starzenia (zamiast liniowego przybliżenia na kWh przepływu)
+    costs["Koszt całk. [PLN]"] += aging["Zużycie BESS [PLN]"] - costs["Zużycie BESS [PLN]"]
+    costs["Zużycie BESS [PLN]"] = aging["Zużycie BESS [PLN]"]
     return {
         "SSR [%]": 100 * np.minimum(demand, gen).sum() / demand.sum(),
         "SSR_import [%]": 100 * (1 - ts["p_grid"].clip(lower=0).sum() / demand.sum()),
@@ -28,13 +41,35 @@ def kpis(r: Results) -> dict[str, float]:
         "dP_over_max [kW]": float(max(0.0, (ts["p_grid"].abs() - p_max).max())),
         "P_grid_peak [kW]": float(ts["p_grid"].max()),
         "UDR [%]": 100 * unmet.mean() if len(done) else 0.0,
-        "EFC [-]": (ts["p_bess"].abs().sum() * dt_h) / (2 * r.site.bess_kwh) if r.site.bess_kwh else 0.0,
+        "UDR wykonalne [%]": 100 * unmet[feasible].mean() if feasible.any() else 0.0,
+        "EFC [-]": efc,
+        "Starzenie cykl. [%]": aging["Starzenie cykl. [%]"],
+        "Starzenie kal. [%]": aging["Starzenie kal. [%]"],
+        "Utrata SoH BESS [%]": aging["Utrata SoH BESS [%]"],
         "Koszt [PLN]": float((ts["p_grid"] * ts["price"] / 1000.0).sum() * dt_h),
+        **costs,
         "E_EV [kWh]": float(ts["p_ev_ch"].sum() * dt_h),
         "E_V2G [kWh]": float(ts["p_ev_dis"].sum() * dt_h),
         "EV łącznie": float(len(ses)),
         "EV odrzucone": float(ses["status"].isin(["balked", "reneged"]).sum()),
         "Śr. oczekiwanie [min]": float(served["wait_min"].mean()) if len(served) else 0.0,
+        **outage_kpis(r),
+    }
+
+
+def outage_kpis(r: Results) -> dict[str, float]:
+    """Wskaźniki pracy wyspowej (awaria GPZ): czas, energia niedostarczona, ograniczenie OZE."""
+    ts, dt_h = r.ts, r.cfg.dt_h
+    if "grid_ok" not in ts:
+        return {"Awaria GPZ [h]": 0.0, "ENS [kWh]": 0.0, "ENS [%]": 0.0, "Ograniczenie OZE [kWh]": 0.0}
+    out = ~ts["grid_ok"].astype(bool)
+    dem = float(ts.loc[out, "load_dem"].sum() * dt_h)
+    ens = float(ts["p_shed"].sum() * dt_h)
+    return {
+        "Awaria GPZ [h]": float(out.sum() * dt_h),
+        "ENS [kWh]": ens,                                    # energia niedostarczona odbiorcom
+        "ENS [%]": 100 * ens / dem if dem > 0 else 0.0,      # względem zapotrzebowania w czasie awarii
+        "Ograniczenie OZE [kWh]": float(ts["p_curt"].sum() * dt_h),
     }
 
 
