@@ -98,3 +98,45 @@ def test_site_gpz_mapping():
 def test_synthetic_branches_marked():
     br = hv_branches(load_power_data())
     assert sum(b.synthetic for b in br) <= 10
+
+
+# ---------------------------------------------------------------- profile tła i źródeł lokalnych
+def _cfg(source, start="2026-06-15"):
+    from microgrid.config import SimConfig
+    return SimConfig(data_source=source, start=start)
+
+
+def test_background_shape_normalised():
+    import numpy as np
+    from microgrid.grid_profiles import background_shape
+    for src, start in (("synthetic", "2026-06-15"), ("real", "2026-01-12")):
+        cfg = _cfg(src, start)
+        s = background_shape(cfg)
+        assert s.shape == (cfg.n_steps,)
+        assert np.isclose(s.max(), 1.0) and s.min() > 0
+
+
+def test_chp_profile_synthetic_is_min():
+    import numpy as np
+    from microgrid.config import CHP_P_MIN_KW
+    from microgrid.grid_profiles import chp_profile
+    cfg = _cfg("synthetic")
+    assert np.allclose(chp_profile(cfg), CHP_P_MIN_KW)
+
+
+def test_chp_profile_real_winter_above_summer():
+    from microgrid.config import CHP_P_MAX_KW, CHP_P_MIN_KW
+    from microgrid.grid_profiles import chp_profile
+    jan, jun = chp_profile(_cfg("real", "2026-01-12")), chp_profile(_cfg("real", "2026-06-15"))
+    print("CHP mean Jan/Jun:", jan.mean(), jun.mean())
+    assert jan.mean() > jun.mean()
+    assert jan.max() <= CHP_P_MAX_KW and jun.min() >= CHP_P_MIN_KW
+
+
+def test_ztpo_profile_constant():
+    import numpy as np
+    from microgrid.config import ZTPO_KW
+    from microgrid.grid_profiles import ztpo_profile
+    cfg = _cfg("synthetic")
+    p = ztpo_profile(cfg)
+    assert p.shape == (cfg.n_steps,) and np.allclose(p, ZTPO_KW)

@@ -14,6 +14,16 @@ import numpy as np
 RHO_AIR = 1.225  # gęstość powietrza [kg/m^3]
 ROUTE_FACTOR = 1.3  # współczynnik wydłużenia trasy względem linii prostej (połączenia zastępcze)
 
+# tło sieci i źródła lokalne (założenia modelu sieci 110/15 kV)
+GPZ_BG_PEAK_KW = 20_000     # szczyt obciążenia tła jednego GPZ dzielnicowego [kW]
+FEEDER_BG_PEAK_KW = 2_000   # szczyt obciążenia tła jednego odpływu 15 kV [kW]
+BG_COS_PHI = 0.95           # współczynnik mocy obciążeń tła
+CHP_P_MAX_KW = 380_000      # Elektrociepłownia Łęg: moc elektryczna maks. (zima) [kW]
+CHP_P_MIN_KW = 60_000       # moc minimalna (lato, tylko ciepła woda) [kW]
+CHP_T_START_C = 15.0        # temperatura dobowa, poniżej której rośnie produkcja ciepła [°C]
+CHP_T_DESIGN_C = -20.0      # temperatura projektowa – pełna moc [°C]
+ZTPO_KW = 7_500             # ZTPO (spalarnia odpadów) – praca ciągła [kW]
+
 
 @dataclass(frozen=True)
 class EVParams:
