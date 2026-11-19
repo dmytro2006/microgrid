@@ -85,3 +85,68 @@ def test_tariff_penalises_overrun(results):
         if a["T_over [min/doba]"] > 0:
             assert a["Kara moc umowna [PLN]"] > 0
         assert kpis(results[(s.name, "D")])["Kara moc umowna [PLN]"] == 0
+
+
+# Wartości policzone na kodzie sprzed refaktoryzacji pętli (SiteSim) – wynik ma się nie zmienić.
+REGRESSION = {
+    "A": (15183.082169, 46.809431),
+    "B": (16111.210732, 152.189942),
+    "C": (15429.118099, 127.084028),
+    "D": (15589.11862, 125.12093),
+}
+
+
+@pytest.mark.parametrize("st", list(REGRESSION))
+def test_run_unchanged_after_refactor(st):
+    cfg = SimConfig(days=2, dt_min=15, seed=3, outage_start_h=17.0, outage_dur_h=4.0, wind_farm="gpz")
+    ts = run(KRAKOW_SITES[1], st, cfg).ts
+    assert (round(ts["p_grid"].sum(), 6), round(ts["soc_bess"].sum(), 6)) == REGRESSION[st]
+
+
+def test_pv_multiplier():
+    from microgrid.simulation import make_inputs
+    base, evs0, _ = make_inputs(KRAKOW_SITES[0], SimConfig(days=1, dt_min=15, seed=5))
+    dbl, evs1, _ = make_inputs(KRAKOW_SITES[0], SimConfig(days=1, dt_min=15, seed=5, pv_multiplier=2.0))
+    assert base["pv"].sum() > 0
+    assert dbl["pv"].sum() == pytest.approx(2.0 * base["pv"].sum(), rel=1e-9)
+    for key in base:
+        if key != "pv":
+            assert (dbl[key] == base[key]).all(), key
+    assert [(e.t_arr, e.cap_kwh) for e in evs0] == [(e.t_arr, e.cap_kwh) for e in evs1]
+
+
+def test_outage_only_selected_gpz():
+    cfg = SimConfig(days=1, dt_min=15, seed=3, outage_start_h=17.0, outage_dur_h=4.0, outage_gpz=("GPZ AGH",))
+    agh = run(KRAKOW_SITES[0], "C", cfg).ts
+    kaz = run(KRAKOW_SITES[2], "C", cfg).ts
+    assert (~agh["grid_ok"]).sum() == 16
+    assert agh["grid_ok"].iloc[0]
+    assert kaz["grid_ok"].all()
+
+
+def test_site_sim_commit_curt_net_and_extra():
+    import simpy
+
+    from microgrid.ev_generator import TICK_EPS
+    from microgrid.simulation import SiteSim
+
+    cfg = SimConfig(days=1, dt_min=15, seed=3)
+    env = simpy.Environment()
+    sim = SiteSim(env, KRAKOW_SITES[0], "C", cfg)
+
+    def ticker():
+        yield env.timeout(TICK_EPS)
+        for k in range(cfg.n_steps):
+            prop = sim.propose(k)
+            prop.curt_net = 0.5 * (prop.pv + prop.wind)
+            sim.commit(prop, extra={"v_pu": 1.0})
+            yield env.timeout(cfg.dt_min)
+
+    sim.start()
+    env.process(ticker())
+    env.run(until=cfg.horizon_min + 2 * TICK_EPS)
+    r = sim.results()
+    assert r.ts["p_curt_net"].sum() > 0
+    assert (r.ts["v_pu"] == 1.0).all()
+    for name, v in energy_balance_residuals(r).items():
+        assert abs(v) < 1e-6, (name, v)

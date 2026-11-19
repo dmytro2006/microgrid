@@ -161,6 +161,10 @@ class SimConfig:
     wind_farm: str = "none"
     wind_farm_mw: float = 3.0
     wind_farm_hub_m: float = 120.0
+    pv_multiplier: float = 1.0       # mnożnik produkcji PV wszystkich węzłów (scenariusze nasycenia PV)
+    # GPZ objęte awarią (nazwy stacji OSM, np. "GPZ AGH"); pusta krotka = awaria wszystkich węzłów.
+    # Przy awarii wybranych GPZ farma wiatrowa (wariant "gpz") nie zasila wysp.
+    outage_gpz: tuple[str, ...] = ()
 
     @property
     def horizon_min(self) -> int:
