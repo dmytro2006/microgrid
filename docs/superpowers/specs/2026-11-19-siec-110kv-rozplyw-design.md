@@ -54,7 +54,15 @@ Dziś każdy węzeł liczony jest osobno, a „GPZ” to jeden umowny punkt na m
    - linie 110/220/400 kV z OSM (kolor wg napięcia), stacje GPZ i PSE (prawdziwe nazwy), linie 15 kV węzeł–GPZ;
    - w symulacji: kolor linii wg obciążenia, kolor węzła wg napięcia;
    - usunięty umowny punkt `GRID_SUPPLY_POINT`; przepływ PCC → własny GPZ; farma wiatrowa → najbliższy GPZ.
-9. Zależność `pandapower>=3.5` (pandas obniżony do 2.3.x, numpy < 2.5); wszystkie testy przechodzą.
+9. **Źródła lokalne na 110 kV** (dodane po akceptacji kierunku):
+   - **Elektrociepłownia Kraków (Łęg, PGE)** – generator na szynie 110 kV stacji „GPZ Łęg” (OSM 50.0517 N,
+     20.0060 E), praca według zapotrzebowania na ciepło: moc elektryczna rośnie liniowo od minimum przy
+     średniej dobowej temperaturze ≥ 15 °C do maksimum przy −20 °C (temperatura z Open-Meteo; w trybie
+     syntetycznym stała 20 °C → minimum);
+   - **ZTPO (ekospalarnia, Nowa Huta)** – stała moc na szynie 110 kV stacji „GPZ ZTPO”;
+   - obie z cos φ = 1, w rozpływie jako `gen`/`sgen`; w czasie pełnego blackoutu pomijane jak reszta sieci
+     (scenariusz wyspy miasta wokół elektrociepłowni z SCO – osobny, kolejny etap).
+10. Zależność `pandapower>=3.5` (pandas obniżony do 2.3.x, numpy < 2.5); wszystkie testy przechodzą.
 
 ## Poza zakresem
 
@@ -62,7 +70,9 @@ Dziś każdy węzeł liczony jest osobno, a „GPZ” to jeden umowny punkt na m
 - Prawdziwa topologia sieci 15 kV OSD (niedostępna) – linia węzeł–GPZ i tło na niej to założenie.
 - Rynek wymiany między węzłami (ceny P2P, spółdzielnia energetyczna) – tylko KPI wymiany wewnętrznej.
 - Wspólny MPC dla całej sieci (wariant C) – możliwy kolejny krok.
-- Elektrociepłownia Łęg i inne źródła na 110 kV – na razie niemodelowane (cała energia z PSE); w ograniczeniach.
+- Scenariusz „awaria sieci krajowej”: wyspa miasta zasilana przez elektrociepłownię i samoczynne
+  częstotliwościowe odciążanie (SCO) – kolejny etap po tym projekcie.
+- Inne źródła na 110 kV (np. Skawina, przemysł) – niemodelowane.
 
 ## Anty-cele (porażka mimo działania)
 
@@ -122,6 +132,8 @@ poza zakresem).
 | wynik | dotychczasowe `Results` na (węzeł, strategia) bez zmian interfejsu + nowe `NetworkResults` na strategię (napięcia szyn, obciążenia linii i transformatorów, straty – szeregi czasowe) | reszta panelu działa bez przeróbek |
 | MPC (D) | planuje lokalnie jak dziś, nie zna ograniczeń sieci; korekty robi koordynator | wspólny MPC poza zakresem |
 | wybór GPZ w awarii | multiselect GPZ węzłów; domyślnie „wszystkie” = dotychczasowe zachowanie | zgodność wstecz |
+| moc elektrociepłowni | maks. 380 MW (ok. 80% z 480 MWe zainstalowanej mocy wg danych z 2020 r.), min. 60 MW latem | trwa modernizacja (bloki gazowe ~100 MWe, docelowo ~150 MWe ok. 2034), więc dostępna moc jest niepewna – parametr w konfiguracji |
+| moc ZTPO | 7,5 MW stale | ok. 65 GWh/rok energii elektrycznej ÷ 8760 h |
 | tło w trybie syntetycznym | kształt `synthetic.base_load` bez szumu | spójność z resztą trybu |
 
 ## Pozostawione wykonawcy
@@ -135,3 +147,12 @@ korekty koordynatora, format cache, wygląd warstw mapy, nazwy KPI w duchu istni
 Przy obecnych mocach PV nadwyżka zmieści się w sieci: linie 110 kV prawie nie zauważą węzłów, a napięcia
 na 15 kV zmienią się o ułamki procenta. Pierwszym ograniczeniem będzie transformator węzła, potem linia 15 kV.
 Analiza zdolności przyłączeniowej pokaże, przy jakiej mocy PV to się zmienia.
+
+## Źródła
+
+- Moc zainstalowana EC Kraków 480 MWe / 1644 MWt: „Nowa Energia” 5–6/2020,
+  https://yadda.icm.edu.pl/yadda/element/bwmeta1.element.baztech-9ad54270-dc2a-446c-8d07-314deeacd2c2/c/NE_5-6_2020_8-11.pdf
+- Modernizacja EC Kraków (silniki gazowe ok. 100 MWe, docelowo ok. 150 MWe):
+  https://www.parkiet.com/energetyka/art43447501-pge-zaczyna-od-gazu-w-krakowie-a-skonczy-na-hubie-ciepla-dzieki-elektryfikacji
+- ZTPO ok. 65 GWh energii elektrycznej rocznie: https://www.cire.pl/pliki/2/2019/spalarnie_odpadow_komunalnych_w_polsce.pdf
+- Stacje i linie WN: © współtwórcy OpenStreetMap (ODbL), pobrane przez Overpass API 2026-11-19.
