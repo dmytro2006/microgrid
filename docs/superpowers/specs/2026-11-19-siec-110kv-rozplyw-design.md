@@ -26,7 +26,7 @@ Dziś każdy węzeł liczony jest osobno, a „GPZ” to jeden umowny punkt na m
      146 km 400 kV).
 2. **Model sieci (pandapower)**:
    - szyny 110 kV wszystkich stacji WN; linie 110 kV odtworzone z geometrii OSM (długość z geometrii);
-   - stacje PSE (Skawina, Wanda, Lubocza) = `ext_grid` (sieć krajowa) na szynie 110 kV, u = 1,0 p.u.;
+   - stacje PSE (Skawina, Wanda, Lubocza) = `ext_grid` (sieć krajowa) na szynie 110 kV, u = 1,05 p.u. (ok. 115,5 kV – typowe napięcie pracy sieci 110 kV);
    - w każdym GPZ 110/15 kV: transformator 110/15 kV i szyna 15 kV z **obciążeniem tła** (reszta dzielnicy);
    - każdy węzeł mikrosieci: **linia kablowa 15 kV do najbliższego GPZ**, po drodze szyna z obciążeniem tła
      innych stacji na tej linii, na końcu transformator 15/0,4 kV o mocy przyłącza węzła i szyna nN (PCC);

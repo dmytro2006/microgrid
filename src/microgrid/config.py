@@ -23,6 +23,7 @@ CHP_P_MIN_KW = 60_000       # moc minimalna (lato, tylko ciepła woda) [kW]
 CHP_T_START_C = 15.0        # temperatura dobowa, poniżej której rośnie produkcja ciepła [°C]
 CHP_T_DESIGN_C = -20.0      # temperatura projektowa – pełna moc [°C]
 ZTPO_KW = 7_500             # ZTPO (spalarnia odpadów) – praca ciągła [kW]
+EXT_GRID_VM_PU = 1.05       # napięcie 110 kV w stacjach PSE (sieć krajowa, regulacja PSE ~115 kV) [p.u.]
 
 
 @dataclass(frozen=True)

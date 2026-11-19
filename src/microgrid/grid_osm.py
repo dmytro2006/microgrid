@@ -66,7 +66,7 @@ def _voltages_kv(tag: str | None) -> tuple[int, ...]:
 
 
 def _short_name(name: str) -> str:
-    m = re.search(r"„([^”]+)”", name)
+    m = re.search(r"„([^”\"]+)[”\"]", name)
     return m.group(1).strip() if m else name
 
 

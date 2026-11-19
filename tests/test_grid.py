@@ -20,15 +20,17 @@ def test_parse_power_fixture():
             _sub(1, "Stacja elektroenergetyczna 400/220/110 kV „SE Test”", "400000;220000;110000"),
             _sub(2, "Stacja elektroenergetyczna 110/15 kV „GPZ Test”", "110000;15000"),
             _sub(3, "Rozdzielnia", "110000"),
+        _sub(4, 'Stacja elektroenergetyczna 110/15 kV „GPZ Prosty"', "110000;15000"),
         ],
         "lines": [{"type": "way", "id": 10, "tags": {"voltage": "110000;0", "circuits": "2", "power": "line"},
                    "geometry": [{"lat": 50.0, "lon": 20.0}, {"lat": 50.01, "lon": 20.0}, {"lat": 50.02, "lon": 20.01}]}],
     }
     d = parse_power(js)
-    assert tuple(s.kind for s in d.substations) == ("pse", "gpz", "hv_only")
+    assert tuple(s.kind for s in d.substations) == ("pse", "gpz", "hv_only", "gpz")
     assert d.substations[1].name == "GPZ Test"
     assert d.substations[0].voltages_kv == (110, 220, 400)
     assert d.substations[2].name == "Rozdzielnia"
+    assert d.substations[3].name == "GPZ Prosty"  # cudzysłów zamykający ASCII
     ln = d.lines[0]
     assert ln.circuits == 2 and len(ln.coords) == 3 and ln.voltage_kv == 110 and not ln.cable
 
