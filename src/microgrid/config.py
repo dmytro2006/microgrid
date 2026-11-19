@@ -165,6 +165,10 @@ class SimConfig:
     # GPZ objęte awarią (nazwy stacji OSM, np. "GPZ AGH"); pusta krotka = awaria wszystkich węzłów.
     # Przy awarii wybranych GPZ farma wiatrowa (wariant "gpz") nie zasila wysp.
     outage_gpz: tuple[str, ...] = ()
+    # wspólna symulacja węzłów w sieci 110/15 kV z rozpływem mocy (cosim.py); network_control → koordynator
+    # sieciowy koryguje węzły naruszające ograniczenia (linia 15 kV, transformator, napięcie nN)
+    network: bool = False
+    network_control: bool = True
 
     @property
     def horizon_min(self) -> int:
