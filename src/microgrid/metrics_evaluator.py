@@ -55,6 +55,37 @@ def kpis(r: Results) -> dict[str, float]:
         "Śr. oczekiwanie [min]": float(served["wait_min"].mean()) if len(served) else 0.0,
         **outage_kpis(r),
         **farm_kpis(r),
+        **network_kpis(r),
+    }
+
+
+def network_kpis(r: Results) -> dict[str, float]:
+    """KPI sieciowe węzła (napięcie, obciążenia, ograniczenie PV); NaN, gdy symulacja bez rozpływu."""
+    ts, dt_h = r.ts, r.cfg.dt_h
+    names = ["U min [p.u.]", "U max [p.u.]", "Obc. linii SN max [%]", "Obc. transf. max [%]",
+             "Ograniczenie PV przez sieć [kWh]", "Naruszenia sieci [kroki]"]
+    if "v_node" not in ts:
+        return {n: float("nan") for n in names}
+    return {
+        names[0]: float(ts["v_node"].min(skipna=True)),
+        names[1]: float(ts["v_node"].max(skipna=True)),
+        names[2]: float(ts["feeder_loading"].max(skipna=True)),
+        names[3]: float(ts["trafo_loading"].max(skipna=True)),
+        names[4]: float(ts["p_curt_net"].sum() * dt_h),
+        names[5]: float(ts["net_violation"].astype(bool).sum()),
+    }
+
+
+def network_summary(nr, dt_h: float) -> dict[str, float]:
+    """KPI całej sieci z ``NetworkResults`` (agregacje pomijają kroki bez rozpływu – NaN)."""
+    hv = nr.hv_loading
+    hv_max = float(np.nanmax(hv)) if hv.size and np.isfinite(hv).any() else float("nan")
+    return {
+        "Obc. linii 110 kV max [%]": hv_max,
+        "Straty sieci [MWh]": float(nr.losses_kw.sum(skipna=True) * dt_h / 1000.0),
+        "Wymiana wewnętrzna [kWh]": float(nr.internal_exchange_kw.sum(skipna=True) * dt_h),
+        "Pobór z PSE max [MW]": float(nr.pse_import_kw.max(skipna=True) / 1000.0),
+        "Produkcja EC Łęg [MWh]": float(nr.chp_kw.sum(skipna=True) * dt_h / 1000.0),
     }
 
 

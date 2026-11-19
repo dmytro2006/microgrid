@@ -114,3 +114,34 @@ def test_outage_of_gpz_without_node():
     assert ((g[out] == 0) | g[out].isna()).all()
     assert (g[~out] > 0).all()
     assert net.pf_ok.all() and res[AGH.name].ts["grid_ok"].all()
+
+
+NET_KPIS = ["U min [p.u.]", "U max [p.u.]", "Obc. linii SN max [%]", "Obc. transf. max [%]",
+            "Ograniczenie PV przez sieć [kWh]", "Naruszenia sieci [kroki]"]
+
+
+def test_network_kpis_present_and_nan_without_network(all_c):
+    from microgrid.metrics_evaluator import kpis, network_summary
+    res, net = all_c
+    k = kpis(res[AGH.name])
+    for name in NET_KPIS:
+        assert np.isfinite(k[name]), name
+    assert 0.9 < k["U min [p.u.]"] <= k["U max [p.u.]"] < 1.1
+    s = network_summary(net, CFG.dt_h)
+    assert set(s) == {"Obc. linii 110 kV max [%]", "Straty sieci [MWh]", "Wymiana wewnętrzna [kWh]",
+                      "Pobór z PSE max [MW]", "Produkcja EC Łęg [MWh]"}
+    assert all(np.isfinite(v) for v in s.values())
+    assert s["Straty sieci [MWh]"] > 0
+    k0 = kpis(run(AGH, "C", dataclasses.replace(CFG, network=False)))
+    for name in NET_KPIS:
+        assert np.isnan(k0[name]), name
+
+
+def test_hosting_capacity_agh():
+    from microgrid.analysis import hosting_capacity
+    a = hosting_capacity(AGH, CFG, "A")
+    b = hosting_capacity(AGH, CFG, "B")
+    for h in (a, b):
+        assert h["kWp"] > AGH.pv_kwp
+        assert h["ograniczenie"] in {"transformator", "linia SN", "napięcie", "brak (≥ maks.)"}
+    assert a["kWp"] <= b["kWp"] + 25.0  # BESS zjada część nadwyżki

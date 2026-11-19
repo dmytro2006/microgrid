@@ -120,3 +120,52 @@ def best_contract(df: pd.DataFrame, udr_penalty_pln: float = 0.0) -> pd.DataFram
     """Najtańsza moc umowna dla każdej strategii (opcjonalnie z karą za każdy p.p. UDR)."""
     d = df.assign(cel=df["Koszt całk. [PLN]"] + udr_penalty_pln * df["UDR wykonalne [%]"])
     return d.loc[d.groupby("Scenariusz")["cel"].idxmin()].set_index("Scenariusz")
+
+
+def _pierwsze_ograniczenie(ts: pd.DataFrame) -> str:
+    """Typ pierwszego naruszonego elementu (kolejność: transformator, linia SN, napięcie)."""
+    from .cosim import LOADING_MAX, V_MAX_PU, V_MIN_PU
+    if (ts["trafo_loading"] > LOADING_MAX).any():
+        return "transformator"
+    if (ts["feeder_loading"] > LOADING_MAX).any():
+        return "linia SN"
+    if ((ts["v_node"] > V_MAX_PU) | (ts["v_node"] < V_MIN_PU)).any():
+        return "napięcie"
+    return "napięcie"
+
+
+def hosting_capacity(site: SiteConfig, cfg: SimConfig, strategy: str = "A", pv_max_kwp: float = 5000.0,
+                     tol_kwp: float = 25.0) -> dict:
+    """Zdolność przyłączeniowa PV węzła: największa moc PV bez naruszenia ograniczeń sieci.
+
+    Bisekcja po ``site.pv_kwp`` (jedna doba, Δt = 15 min, bez koordynatora sieciowego, bez farmy
+    wiatrowej i awarii; liczą się tylko naruszenia w krokach bez naruszeń przy PV = 0). ``ograniczenie`` – pierwszy naruszony element na granicy.
+    """
+    from .cosim import run_network
+    c = replace(cfg, network=True, network_control=False, days=1, dt_min=15, wind_farm="none",
+                outage_start_h=None)
+
+    def run_ts(kwp: float) -> pd.DataFrame:
+        res, _ = run_network([site.with_(pv_kwp=float(kwp))], strategy, c)
+        return res[site.name].ts
+
+    # kroki, w których sieć jest przeciążona już bez PV (np. samym poborem EV), nie są winą PV
+    base = run_ts(0.0)["net_violation"].astype(bool).to_numpy()
+
+    def violated(kwp: float):
+        ts = run_ts(kwp)
+        new = ts["net_violation"].astype(bool).to_numpy() & ~base
+        return bool(new.any()), ts[new]
+
+    bad, ts = violated(pv_max_kwp)
+    if not bad:
+        return {"kWp": float(pv_max_kwp), "ograniczenie": "brak (≥ maks.)"}
+    lo, hi, ts_hi = 0.0, float(pv_max_kwp), ts
+    while hi - lo > tol_kwp:
+        mid = 0.5 * (lo + hi)
+        bad, ts = violated(mid)
+        if bad:
+            hi, ts_hi = mid, ts
+        else:
+            lo = mid
+    return {"kWp": lo, "ograniczenie": _pierwsze_ograniczenie(ts_hi)}
